@@ -217,3 +217,50 @@ uint32_t get_tof_2_last_update_ms(void) {
   portEXIT_CRITICAL(&tof_mux);
   return value;
 }
+
+static size_t previous_line_length = 0;
+static int16_t previous_tof1 = INT16_MIN;
+static int16_t previous_tof2 = INT16_MIN;
+
+void tof_display(void) {
+  int16_t tof1 = get_mes_tof_1();
+  int16_t tof2 = get_mes_tof_2();
+
+  if (tof1 == previous_tof1 && tof2 == previous_tof2) {
+    return;
+  }
+
+  char line[48];
+  snprintf(line, sizeof(line), "TOF 1: %4d mm    TOF 2: %4d mm", tof1, tof2);
+
+  for (size_t i = 0; i < previous_line_length; i++) {
+    Serial.print('\b');
+  }
+
+  Serial.print(line);
+  previous_line_length = strlen(line);
+  previous_tof1 = tof1;
+  previous_tof2 = tof2;
+}
+
+
+void init_tof(bool debug){
+  
+  if(debug){
+    Serial.println();
+    Serial.println("Demarrage du test TOF...");
+  }
+  
+
+  if (launch_tof_mes()) {
+    if(debug){Serial.println("Tache de mesure TOF lancee.");}
+  } else {
+    if(debug){Serial.println("Erreur: aucun TOF initialise correctement.");}
+  }
+
+  if(debug){
+    Serial.println();
+    tof_display();
+  }
+
+}
