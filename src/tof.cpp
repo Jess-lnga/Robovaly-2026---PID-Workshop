@@ -17,8 +17,9 @@ static const uint8_t TOF_2_ADDR = 0x31;
 static const uint32_t I2C_CLOCK_HZ = 50000;
 static const uint16_t I2C_TIMEOUT_MS = 500;
 
-static const uint16_t TOF_CONTINUOUS_PERIOD_MS = 50;
-static const uint32_t TOF_POLL_PERIOD_MS = 10;
+static const uint32_t TOF_TIMING_BUDGET_US = 20000;
+static const uint32_t TOF_SLOT_MS = 25;
+static const uint32_t TOF_POLL_PERIOD_MS = 1;
 static const BaseType_t TOF_TASK_CORE = 1;
 static const uint32_t TOF_BOOT_DELAY_MS = 150;
 
@@ -62,6 +63,15 @@ static void tofs_all_off(void) {
   delay(TOF_BOOT_DELAY_MS);
 }
 
+enum TofTaskState {
+  START_TOF_1,
+  WAIT_TOF_1,
+  READ_TOF_1,
+  START_TOF_2,
+  WAIT_TOF_2,
+  READ_TOF_2,
+};
+
 static bool start_tof(Adafruit_VL53L0X &sensor, int xshut_pin, uint8_t new_addr) {
   digitalWrite(xshut_pin, HIGH);
   delay(TOF_BOOT_DELAY_MS);
@@ -73,10 +83,7 @@ static bool start_tof(Adafruit_VL53L0X &sensor, int xshut_pin, uint8_t new_addr)
     return false;
   }
 
-  if (!sensor.setMeasurementTimingBudgetMicroSeconds(33000)) {
-    return false;
-  }
-  if (!sensor.startRangeContinuous(TOF_CONTINUOUS_PERIOD_MS)) {
+  if (!sensor.setMeasurementTimingBudgetMicroSeconds(TOF_TIMING_BUDGET_US)) {
     return false;
   }
 
@@ -115,15 +122,8 @@ static bool init_tofs(void) {
   return first_ok || second_ok;
 }
 
-static void poll_one_tof(Adafruit_VL53L0X &sensor, bool initialized,
+static void read_one_tof(Adafruit_VL53L0X &sensor,
                          void (*store_measurement)(int16_t)) {
-  if (!initialized) {
-    return;
-  }
-  if (!sensor.isRangeComplete()) {
-    return;
-  }
-
   uint16_t range_mm = sensor.readRangeResult();
   if (sensor.readRangeStatus() != 0 || range_mm == 0 || range_mm > INT16_MAX) {
     return;
@@ -136,6 +136,9 @@ static void tof_task(void *pv) {
   (void)pv;
 
   TickType_t last_wake = xTaskGetTickCount();
+  TofTaskState state = START_TOF_1;
+  uint32_t measure_start_ms = 0;
+  bool measure_ready = false;
 
   for (;;) {
     bool first_ok;
@@ -146,8 +149,61 @@ static void tof_task(void *pv) {
     second_ok = tof_2_ok;
     portEXIT_CRITICAL(&tof_mux);
 
-    poll_one_tof(tof_1, first_ok, set_tof_1_measurement);
-    poll_one_tof(tof_2, second_ok, set_tof_2_measurement);
+    uint32_t now = millis();
+
+    switch (state) {
+      case START_TOF_1:
+        if (!first_ok) {
+          state = START_TOF_2;
+          break;
+        }
+        measure_start_ms = now;
+        measure_ready = false;
+        state = tof_1.startRange() ? WAIT_TOF_1 : START_TOF_2;
+        break;
+
+      case WAIT_TOF_1:
+        measure_ready = tof_1.isRangeComplete();
+        if (measure_ready || (now - measure_start_ms >= TOF_SLOT_MS)) {
+          state = READ_TOF_1;
+        }
+        break;
+
+      case READ_TOF_1:
+        if (measure_ready) {
+          read_one_tof(tof_1, set_tof_1_measurement);
+        } else {
+          tof_1.stopMeasurement();
+        }
+        state = START_TOF_2;
+        break;
+
+      case START_TOF_2:
+        if (!second_ok) {
+          state = START_TOF_1;
+          break;
+        }
+        measure_start_ms = now;
+        measure_ready = false;
+        state = tof_2.startRange() ? WAIT_TOF_2 : START_TOF_1;
+        break;
+
+      case WAIT_TOF_2:
+        measure_ready = tof_2.isRangeComplete();
+        if (measure_ready || (now - measure_start_ms >= TOF_SLOT_MS)) {
+          state = READ_TOF_2;
+        }
+        break;
+
+      case READ_TOF_2:
+        if (measure_ready) {
+          read_one_tof(tof_2, set_tof_2_measurement);
+        } else {
+          tof_2.stopMeasurement();
+        }
+        state = START_TOF_1;
+        break;
+    }
 
     vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(TOF_POLL_PERIOD_MS));
   }

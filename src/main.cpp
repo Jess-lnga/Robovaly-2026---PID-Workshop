@@ -19,6 +19,7 @@ static int16_t previous_tof2 = INT16_MIN;
 
 void display_distances(){
   update_tof_distances();
+  compute_ball_position();
 
   int16_t tof1 = get_d1();
   int16_t tof2 = get_d2();

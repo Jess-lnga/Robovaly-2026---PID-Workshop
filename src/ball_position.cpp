@@ -11,12 +11,14 @@ static const int TABLE_INCERT_MM = 5;
 
 
 // ------ TOF CALLIBRATION ------
+static const int MAX_VALUE_TOF_MM = 170;
 static int tof1_offset_mm = 0;
 static int tof2_offset_mm = 0;
 
 
+
 // ------ MOVING AVERAGES ------
-static const int MV_AVG_LENGTH = 10;
+static const int MV_AVG_LENGTH = 5;
 static int mv_avg_d1[MV_AVG_LENGTH] = {0};
 static int mv_avg_d2[MV_AVG_LENGTH] = {0};
 
@@ -91,27 +93,58 @@ void update_tof_distances(){
 }
 
 bool compute_ball_position(){
-    d1 += tof1_offset_mm;
-    d2 += tof2_offset_mm;
+    int d1_corr = 0;
+    int d2_corr = 0;
 
     if(d1_valid && d2_valid){
+        d1_corr = d1 + tof1_offset_mm;
+        d2_corr = d2 + tof2_offset_mm;
 
+        if(d1_corr > MAX_VALUE_TOF_MM){
+            if(d2_corr > MAX_VALUE_TOF_MM){
+                ball_position_mm = -1;
+                return false;
+            }
+            else{
+                ball_position_mm = d2_corr;
+                return true;
+            }
+        }else{
+            if(d2_corr > MAX_VALUE_TOF_MM){
+                ball_position_mm = TABLE_LENGTH_MM - d1_corr;
+                return true;
+            }
+            else{
+                ball_position_mm = (TABLE_LENGTH_MM - d1_corr + d2_corr) / 2;
+                return true;
+            }
+        }
+    }else if(d1_valid){
 
-    }
+        d1_corr = d1 + tof1_offset_mm;
 
-    if(d1_valid && !d2_valid){
-        ball_position_mm = TABLE_LENGTH_MM - d1 - BALL_RADIUS_MM;
+        if(d1_corr > MAX_VALUE_TOF_MM){
+            ball_position_mm = -1;
+            return false;
+        }
+
+        ball_position_mm = TABLE_LENGTH_MM - d1_corr;
         return true;
-    }
+    }else if(d2_valid){
 
-    if(!d1_valid && d2_valid){
-        ball_position_mm = d2 - BALL_RADIUS_MM;
+        d2_corr = d2 + tof2_offset_mm;
+
+        if(d2_corr > MAX_VALUE_TOF_MM){
+            ball_position_mm = -1;
+            return false;
+        }
+
+        ball_position_mm = d2_corr;
         return true;
     }
 
     ball_position_mm = -1;
     return false;
-
 }
 
 int get_d1(){
@@ -120,8 +153,7 @@ int get_d1(){
     }
     else{
         return -1;
-    }
-    
+    }   
 }
 
 int get_d2(){
