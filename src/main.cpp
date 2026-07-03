@@ -6,35 +6,25 @@ github: jess-lnga
 */
 
 #include <Arduino.h>
-
 #include "tof.h"
 
 static const uint32_t SERIAL_BAUDRATE = 115200;
-static const uint32_t PRINT_PERIOD_MS = 200;
-
-static void print_distance(int16_t value_mm) {
-  if (value_mm >= 0) {
-    char value_buffer[8];
-    snprintf(value_buffer, sizeof(value_buffer), "%4d", value_mm);
-    Serial.print(value_buffer);
-  } else {
-    Serial.print("----");
-  }
-}
+static const uint32_t PRINT_PERIOD_MS = 100;
+static size_t previous_line_length = 0;
 
 static void refresh_tof_display(void) {
-  Serial.print("\r\033[2K");
-  Serial.print("TOF 1 : ");
-  print_distance(get_mes_tof_1());
+  int16_t tof1 = get_mes_tof_1();
+  int16_t tof2 = get_mes_tof_2();
 
-  Serial.print(" mm");
+  char line[48];
+  snprintf(line, sizeof(line), "TOF 1: %4d mm    TOF 2: %4d mm", tof1, tof2);
 
-  Serial.print("\n\033[2K");
-  Serial.print("TOF 2 : ");
-  print_distance(get_mes_tof_2());
-  Serial.print(" mm");
+  for (size_t i = 0; i < previous_line_length; i++) {
+    Serial.print('\b');
+  }
 
-  Serial.print("\033[1A");
+  Serial.print(line);
+  previous_line_length = strlen(line);
 }
 
 void setup() {
