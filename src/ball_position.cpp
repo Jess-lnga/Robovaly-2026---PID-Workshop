@@ -11,7 +11,12 @@ static const int TABLE_INCERT_MM = 5;
 
 
 // ------ TOF CALLIBRATION ------
-static const int MAX_VALUE_TOF_MM = 170;
+static const int MAX_VALUE_TOF1_MM = 170;
+static const int MAX_VALUE_TOF2_MM = 170;
+static const int MIN_VALUE_TOF1_MM = 115; // Not the absolute minimum, but the minimum which shows that we need to only use this tof
+static const int MIN_VALUE_TOF2_MM = 120;
+
+static const int MIN_ACCEPTABLE_TOF_VALUE_MM = 80; //If both tofs give values below this threshold, we consider that there is a problem
 static int tof1_offset_mm = 0;
 static int tof2_offset_mm = 0;
 
@@ -100,8 +105,8 @@ bool compute_ball_position(){
         d1_corr = d1 + tof1_offset_mm;
         d2_corr = d2 + tof2_offset_mm;
 
-        if(d1_corr > MAX_VALUE_TOF_MM){
-            if(d2_corr > MAX_VALUE_TOF_MM){
+        if(d1_corr > MAX_VALUE_TOF1_MM){
+            if(d2_corr > MAX_VALUE_TOF2_MM){
                 ball_position_mm = -1;
                 return false;
             }
@@ -110,11 +115,16 @@ bool compute_ball_position(){
                 return true;
             }
         }else{
-            if(d2_corr > MAX_VALUE_TOF_MM){
+            if(d1_corr < MIN_ACCEPTABLE_TOF_VALUE_MM && d2_corr < MIN_ACCEPTABLE_TOF_VALUE_MM){
+                ball_position_mm = -1;
+                return false;
+            }
+
+            if((d1_corr < MIN_VALUE_TOF1_MM)||(d2_corr > MAX_VALUE_TOF2_MM)){
                 ball_position_mm = TABLE_LENGTH_MM - d1_corr;
                 return true;
-            }
-            else{
+
+            }else{
                 ball_position_mm = (TABLE_LENGTH_MM - d1_corr + d2_corr) / 2;
                 return true;
             }
@@ -123,7 +133,7 @@ bool compute_ball_position(){
 
         d1_corr = d1 + tof1_offset_mm;
 
-        if(d1_corr > MAX_VALUE_TOF_MM){
+        if(d1_corr > MAX_VALUE_TOF1_MM){
             ball_position_mm = -1;
             return false;
         }
@@ -134,7 +144,7 @@ bool compute_ball_position(){
 
         d2_corr = d2 + tof2_offset_mm;
 
-        if(d2_corr > MAX_VALUE_TOF_MM){
+        if(d2_corr > MAX_VALUE_TOF2_MM){
             ball_position_mm = -1;
             return false;
         }
