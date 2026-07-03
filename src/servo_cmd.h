@@ -11,11 +11,17 @@ github: jess-lnga
 #include <stdbool.h>
 #include <stdint.h>
 
+#define SERVO_CMD_DEFAULT_PIN 18
+#define SERVO_CMD_NEUTRAL_DEG 90
+#define SERVO_CMD_MIN_DEG 0
+#define SERVO_CMD_MAX_DEG 180
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-bool init_servo_cmd(uint8_t servo_pin);
+bool init_servo_cmd(void);
+bool init_servo_cmd_on_pin(uint8_t servo_pin);
 
 bool set_servo_angle(int angle_deg);
 void set_servo_angle_limits(int min_angle_deg, int max_angle_deg);

@@ -17,5 +17,7 @@ int get_ball_position();
 int get_ball_speed();
 bool is_ball_speed_valid();
 
+void display_distances();
+
 
 #endif // BALL_POS_H
