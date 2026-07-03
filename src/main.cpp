@@ -11,7 +11,7 @@ github: jess-lnga
 
 static const uint32_t SERIAL_BAUDRATE = 115200;
 static const uint32_t PRINT_PERIOD_MS = 100;
-static const uint32_t POS_UPDATE_DELAY_MS = 150;
+static const uint32_t POS_UPDATE_DELAY_MS = 50;
 
 static size_t previous_line_length = 0;
 static int16_t previous_tof1 = INT16_MIN;
@@ -51,5 +51,5 @@ void setup() {
 
 void loop() {
   display_distances();
-  vTaskDelay(pdMS_TO_TICKS(PRINT_PERIOD_MS));
+  vTaskDelay(pdMS_TO_TICKS(POS_UPDATE_DELAY_MS));
 }

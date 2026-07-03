@@ -115,11 +115,22 @@ bool compute_ball_position(){
 }
 
 int get_d1(){
-    return d1;
+    if(d1_valid){
+        return d1;
+    }
+    else{
+        return -1;
+    }
+    
 }
 
 int get_d2(){
-    return d2;
+    if(d2_valid){
+        return d2;
+    }
+    else{
+        return -1;
+    }
 }
 
 int get_ball_position(){
