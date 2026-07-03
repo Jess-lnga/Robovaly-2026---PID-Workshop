@@ -36,7 +36,14 @@ static int d2 = 0;
 static int count_d1 = 0;
 static int count_d2 = 0;
 
+// ------ BALL POSITION - SPEED - TIMESTAMPS ------
 static int ball_position_mm = 0;
+static int ball_position_prev_mm = 0;
+
+static uint32_t last_ball_position_update_ms = 0;
+static bool ball_position_prev_valid = false;
+
+static int ball_speed_mm_per_s = 0;
 
 // ------ WATCHDOG AND TIMEOUTS ------
 static const uint32_t TOF_TIMEOUT_MS = 300;
@@ -46,6 +53,7 @@ static uint32_t last_valid_d2_ms = 0;
 
 static bool d1_valid = false;
 static bool d2_valid = false;
+static bool speed_valid = false;
 
 //////////////////////////////////////
 
@@ -97,9 +105,47 @@ void update_tof_distances(){
     if (count_d2 > 0) d2 = sum_d2 / count_d2;
 }
 
+bool compute_ball_speed(){
+    uint32_t now = millis();
+
+    if(ball_position_mm < 0){
+        ball_position_prev_valid = false;
+        speed_valid = false;
+        ball_speed_mm_per_s = 0;
+        return false;
+    }
+
+    if(!ball_position_prev_valid){
+        ball_position_prev_mm = ball_position_mm;
+        last_ball_position_update_ms = now;
+        ball_position_prev_valid = true;
+        speed_valid = false;
+        ball_speed_mm_per_s = 0;
+        return false;
+    }
+
+    uint32_t dt_ms = now - last_ball_position_update_ms;
+
+    if(dt_ms == 0){
+        speed_valid = false;
+        return false;
+    }
+
+    int delta_position_mm = ball_position_mm - ball_position_prev_mm;
+    ball_speed_mm_per_s = (delta_position_mm * 1000) / (int)dt_ms;
+
+    ball_position_prev_mm = ball_position_mm;
+    last_ball_position_update_ms = now;
+    speed_valid = true;
+
+    return true;
+}
+
+
 bool compute_ball_position(){
     int d1_corr = 0;
     int d2_corr = 0;
+    bool position_valid = false;
 
     if(d1_valid && d2_valid){
         d1_corr = d1 + tof1_offset_mm;
@@ -108,25 +154,22 @@ bool compute_ball_position(){
         if(d1_corr > MAX_VALUE_TOF1_MM){
             if(d2_corr > MAX_VALUE_TOF2_MM){
                 ball_position_mm = -1;
-                return false;
             }
             else{
                 ball_position_mm = d2_corr;
-                return true;
+                position_valid = true;
             }
         }else{
             if(d1_corr < MIN_ACCEPTABLE_TOF_VALUE_MM && d2_corr < MIN_ACCEPTABLE_TOF_VALUE_MM){
                 ball_position_mm = -1;
-                return false;
             }
-
-            if((d1_corr < MIN_VALUE_TOF1_MM)||(d2_corr > MAX_VALUE_TOF2_MM)){
+            else if((d1_corr < MIN_VALUE_TOF1_MM)||(d2_corr > MAX_VALUE_TOF2_MM)){
                 ball_position_mm = TABLE_LENGTH_MM - d1_corr;
-                return true;
+                position_valid = true;
 
             }else{
                 ball_position_mm = (TABLE_LENGTH_MM - d1_corr + d2_corr) / 2;
-                return true;
+                position_valid = true;
             }
         }
     }else if(d1_valid){
@@ -135,26 +178,28 @@ bool compute_ball_position(){
 
         if(d1_corr > MAX_VALUE_TOF1_MM){
             ball_position_mm = -1;
-            return false;
         }
-
-        ball_position_mm = TABLE_LENGTH_MM - d1_corr;
-        return true;
+        else{
+            ball_position_mm = TABLE_LENGTH_MM - d1_corr;
+            position_valid = true;
+        }
     }else if(d2_valid){
 
         d2_corr = d2 + tof2_offset_mm;
 
         if(d2_corr > MAX_VALUE_TOF2_MM){
             ball_position_mm = -1;
-            return false;
         }
-
-        ball_position_mm = d2_corr;
-        return true;
+        else{
+            ball_position_mm = d2_corr;
+            position_valid = true;
+        }
+    }else{
+        ball_position_mm = -1;
     }
 
-    ball_position_mm = -1;
-    return false;
+    compute_ball_speed();
+    return position_valid;
 }
 
 int get_d1(){
@@ -177,6 +222,19 @@ int get_d2(){
 
 int get_ball_position(){
     return ball_position_mm;
+}
+
+int get_ball_speed(){
+    if(speed_valid){
+        return ball_speed_mm_per_s;
+    }
+    else{
+        return 0;
+    }
+}
+
+bool is_ball_speed_valid(){
+    return speed_valid;
 }
 
 
