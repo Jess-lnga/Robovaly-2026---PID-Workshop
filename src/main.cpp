@@ -12,6 +12,31 @@ github: jess-lnga
 static const uint32_t SERIAL_BAUDRATE = 115200;
 static const uint32_t PRINT_PERIOD_MS = 200;
 
+static void print_distance(int16_t value_mm) {
+  if (value_mm >= 0) {
+    char value_buffer[8];
+    snprintf(value_buffer, sizeof(value_buffer), "%4d", value_mm);
+    Serial.print(value_buffer);
+  } else {
+    Serial.print("----");
+  }
+}
+
+static void refresh_tof_display(void) {
+  Serial.print("\r\033[2K");
+  Serial.print("TOF 1 : ");
+  print_distance(get_mes_tof_1());
+
+  Serial.print(" mm");
+
+  Serial.print("\n\033[2K");
+  Serial.print("TOF 2 : ");
+  print_distance(get_mes_tof_2());
+  Serial.print(" mm");
+
+  Serial.print("\033[1A");
+}
+
 void setup() {
   Serial.begin(SERIAL_BAUDRATE);
   delay(200);
@@ -24,29 +49,12 @@ void setup() {
   } else {
     Serial.println("Erreur: aucun TOF initialise correctement.");
   }
+
+  Serial.println();
+  refresh_tof_display();
 }
 
 void loop() {
-  const int16_t mes_tof_1 = get_mes_tof_1();
-  const int16_t mes_tof_2 = get_mes_tof_2();
-
-  Serial.print("TOF 1");
-  Serial.print(tof_1_is_initialized() ? " OK" : " KO");
-  Serial.print(" | mesure: ");
-  Serial.print(mes_tof_1);
-  Serial.print(" mm | derniere maj: ");
-  Serial.print(get_tof_1_last_update_ms());
-  Serial.print(" ms");
-
-  Serial.print("  ||  ");
-
-  Serial.print("TOF 2");
-  Serial.print(tof_2_is_initialized() ? " OK" : " KO");
-  Serial.print(" | mesure: ");
-  Serial.print(mes_tof_2);
-  Serial.print(" mm | derniere maj: ");
-  Serial.print(get_tof_2_last_update_ms());
-  Serial.println(" ms");
-
+  refresh_tof_display();
   vTaskDelay(pdMS_TO_TICKS(PRINT_PERIOD_MS));
 }
