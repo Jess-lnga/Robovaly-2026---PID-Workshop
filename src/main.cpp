@@ -809,7 +809,7 @@ void setup() {
   digitalWrite(XSHUT_RIGHT, HIGH);
   delay(10);
   Serial.println("Init TOF Droite...");
-  rightOk = tofRight.begin(0x29, &Wire);
+  rightOk = tofRight.begin(0x29, false, &Wire);
   if (rightOk) {
     tofRight.setAddress(ADDR_RIGHT);
     Serial.println("OK Droite -> addr 0x30");
@@ -820,7 +820,7 @@ void setup() {
   digitalWrite(XSHUT_LEFT, HIGH);
   delay(10);
   Serial.println("Init TOF Gauche...");
-  leftOk = tofLeft.begin(0x29, &Wire);
+  leftOk = tofLeft.begin(0x29, false, &Wire);
   if (leftOk) {
     tofLeft.setAddress(ADDR_LEFT);
     Serial.println("OK Gauche -> addr 0x31");
