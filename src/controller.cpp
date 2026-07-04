@@ -11,7 +11,7 @@ static const int SERVO_MAX_STEP_DEG = 40;
 static const float SERVO_FILTER_ALPHA = 1.0f;
 
 static bool controller_initialized = false;
-static bool controller_enabled = true;
+static bool controller_enabled = false;
 static bool last_update_valid = false;
 
 static int reference_mm = DEFAULT_REFERENCE_MM;
@@ -66,9 +66,10 @@ bool init_controller(void) {
         }
     }
 
+    set_servo_angle(SERVO_CMD_NEUTRAL_DEG);
     reset_controller();
     controller_initialized = true;
-    controller_enabled = true;
+    controller_enabled = false;
     return set_servo_angle(last_angle_deg);
 }
 

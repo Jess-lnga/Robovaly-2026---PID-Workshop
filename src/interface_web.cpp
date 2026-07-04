@@ -94,7 +94,30 @@ const servoTxt=document.getElementById('servoTxt'), tableTxt=document.getElement
 let state={x:-1,v:0,speed_valid:false,servo_angle:90,stabilization:true,kp:0,ki:0,kd:0,ref:150,d1:-1,d2:-1};
 let sceneFrozen=false, plotRunning=false, angleFrozen=false, posFrozen=false, plotStart=0, angleData=[], posData=[], lastStab=true, editing=false;
 function fit(c){const r=c.getBoundingClientRect(),d=window.devicePixelRatio||1;const w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));if(c.width!==w||c.height!==h){c.width=w;c.height=h}}
-function drawScene(){fit(scene);const c=scene.getContext('2d'),w=scene.width,h=scene.height;c.clearRect(0,0,w,h);c.lineWidth=4;c.strokeStyle='#171717';c.fillStyle='#171717';const cx=w*.5,cy=h*.58,len=w*.68;const tableDeg=state.servo_angle/2;const slopeDeg=tableDeg-45;const a=slopeDeg*Math.PI/180;const dx=Math.cos(a)*len/2,dy=Math.sin(a)*len/2;const x1=cx-dx,y1=cy-dy,x2=cx+dx,y2=cy+dy;c.beginPath();c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke();c.beginPath();c.moveTo(cx,cy+8);c.lineTo(cx-w*.035,cy+h*.19);c.lineTo(cx+w*.035,cy+h*.19);c.closePath();c.stroke();let p=state.x>=0?Math.max(0,Math.min(TABLE_LEN_MM,state.x))/TABLE_LEN_MM:.5;let bx=x1+(x2-x1)*p,by=y1+(y2-y1)*p;const r=Math.max(16,Math.min(w,h)*.04);c.beginPath();c.arc(bx,by-r*.85,r,0,Math.PI*2);c.stroke();c.beginPath();c.moveTo(bx-r*.65,by-r*1.5);c.lineTo(bx+r*.65,by-r*.2);c.moveTo(bx+r*.65,by-r*1.5);c.lineTo(bx-r*.65,by-r*.2);c.stroke();c.font=`${Math.max(14,w*.018)}px Arial`;c.fillText(`x=${state.x} mm`,18,h-44);c.fillText(`servo=${state.servo_angle} deg / table=${tableDeg.toFixed(1)} deg`,18,h-20)}
+function drawScene(){
+fit(scene);
+const c=scene.getContext('2d'),w=scene.width,h=scene.height;
+c.clearRect(0,0,w,h);
+c.lineWidth=4;c.strokeStyle='#171717';c.fillStyle='#171717';
+const cx=w*.5,cy=h*.58,len=w*.68;
+const tableDeg=state.servo_angle/2;
+const slopeDeg=45-tableDeg;
+const a=slopeDeg*Math.PI/180;
+const ux=Math.cos(a),uy=Math.sin(a);
+const nx=uy,ny=-ux;
+const x1=cx-ux*len/2,y1=cy-uy*len/2,x2=cx+ux*len/2,y2=cy+uy*len/2;
+c.beginPath();c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke();
+c.beginPath();c.moveTo(cx,cy+8);c.lineTo(cx-w*.035,cy+h*.19);c.lineTo(cx+w*.035,cy+h*.19);c.closePath();c.stroke();
+let p=state.x>=0?Math.max(0,Math.min(TABLE_LEN_MM,state.x))/TABLE_LEN_MM:.5;
+const r=Math.max(16,Math.min(w,h)*.04);
+let contactX=x1+(x2-x1)*p,contactY=y1+(y2-y1)*p;
+let bx=contactX+nx*r,by=contactY+ny*r;
+c.beginPath();c.arc(bx,by,r,0,Math.PI*2);c.stroke();
+c.beginPath();c.moveTo(bx-r*.65,by-r*.65);c.lineTo(bx+r*.65,by+r*.65);c.moveTo(bx+r*.65,by-r*.65);c.lineTo(bx-r*.65,by+r*.65);c.stroke();
+c.font=`${Math.max(14,w*.018)}px Arial`;
+c.fillText(`x=${state.x} mm`,18,h-44);
+c.fillText(`servo=${state.servo_angle} deg / table=${tableDeg.toFixed(1)} deg`,18,h-20);
+}
 function scaleMax(t){return t<10?10:t<20?20:30}
 function drawPlot(canvas,data,color,label,freeze){fit(canvas);const c=canvas.getContext('2d'),w=canvas.width,h=canvas.height,p=44;c.clearRect(0,0,w,h);c.lineWidth=3;c.strokeStyle='#171717';c.beginPath();c.moveTo(p,12);c.lineTo(p,h-p);c.lineTo(w-12,h-p);c.stroke();const tNow=plotRunning?(performance.now()-plotStart)/1000:(data.length?data[data.length-1].t:0);const xmax=scaleMax(tNow);let vals=data.map(d=>d.y).filter(Number.isFinite);let ymin=label==='pos'?0:0,ymax=label==='pos'?TABLE_LEN_MM:90;if(vals.length&&label!=='pos'){ymin=Math.min(0,...vals)-5;ymax=Math.max(90,...vals)+5;if(ymax-ymin<20){ymin-=10;ymax+=10}}c.strokeStyle='#777';c.lineWidth=1;c.beginPath();let y0=h-p-(0-ymin)/(ymax-ymin)*(h-p-16);if(y0>12&&y0<h-p){c.moveTo(p,y0);c.lineTo(w-12,y0)}c.stroke();c.strokeStyle=color;c.lineWidth=4;c.beginPath();data.forEach((d,i)=>{const x=p+(d.t/xmax)*(w-p-18);const y=h-p-(d.y-ymin)/(ymax-ymin)*(h-p-16);if(i===0)c.moveTo(x,y);else c.lineTo(x,y)});c.stroke();c.fillStyle='#171717';c.font=`${Math.max(12,w*.025)}px Arial`;c.fillText(`${label} | 0-${xmax}s`,p+8,24);if(vals.length)c.fillText(`${vals[vals.length-1].toFixed(1)}`,w-90,24)}
 function drawAll(){if(!sceneFrozen)drawScene();if(!angleFrozen)drawPlot(anglePlot,angleData,'#c43131','angle',false);if(!posFrozen)drawPlot(posPlot,posData,'#2457b8','pos',false)}
