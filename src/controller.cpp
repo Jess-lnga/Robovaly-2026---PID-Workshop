@@ -7,8 +7,8 @@ static const int DEFAULT_REFERENCE_MM = 150;
 static const uint32_t MIN_CONTROLLER_DT_MS = 5;
 static const float INTEGRAL_LIMIT_MM_S = 3000.0f;
 static const int SERVO_DEADBAND_DEG = 0;
-static const int SERVO_MAX_STEP_DEG = 45;
-static const float SERVO_FILTER_ALPHA = 0.85f;
+static const int SERVO_MAX_STEP_DEG = 50;
+static const float SERVO_FILTER_ALPHA = 1.0f;
 
 static bool controller_initialized = false;
 static bool controller_enabled = true;
@@ -17,9 +17,9 @@ static bool last_update_valid = false;
 static int reference_mm = DEFAULT_REFERENCE_MM;
 static int last_angle_deg = SERVO_CMD_NEUTRAL_DEG;
 
-static float kp = 0.0f;
+static float kp = 0.15f;
 static float ki = 0.0f;
-static float kd = 0.105f;
+static float kd = 0.14f;
 
 static float integral_error_mm_s = 0.0f;
 static float filtered_angle_deg = SERVO_CMD_NEUTRAL_DEG;

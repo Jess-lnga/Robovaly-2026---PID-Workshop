@@ -23,7 +23,7 @@ static int tof2_offset_mm = 0;
 
 
 // ------ MOVING AVERAGES ------
-static const int MV_AVG_LENGTH = 5;
+static const int MV_AVG_LENGTH = 1;
 static int mv_avg_d1[MV_AVG_LENGTH] = {0};
 static int mv_avg_d2[MV_AVG_LENGTH] = {0};
 
@@ -37,6 +37,8 @@ static int count_d1 = 0;
 static int count_d2 = 0;
 
 // ------ BALL POSITION - SPEED - TIMESTAMPS ------
+static const float SPEED_FILTER_ALPHA = 0.30f;
+
 static int ball_position_mm = 0;
 static int ball_position_prev_mm = 0;
 
@@ -44,6 +46,7 @@ static uint32_t last_ball_position_update_ms = 0;
 static bool ball_position_prev_valid = false;
 
 static int ball_speed_mm_per_s = 0;
+static float ball_speed_filtered_mm_per_s = 0.0f;
 
 // ------ WATCHDOG AND TIMEOUTS ------
 static const uint32_t TOF_TIMEOUT_MS = 300;
@@ -122,6 +125,7 @@ bool compute_ball_speed(){
         ball_position_prev_valid = false;
         speed_valid = false;
         ball_speed_mm_per_s = 0;
+        ball_speed_filtered_mm_per_s = 0.0f;
         return false;
     }
 
@@ -131,6 +135,7 @@ bool compute_ball_speed(){
         ball_position_prev_valid = true;
         speed_valid = false;
         ball_speed_mm_per_s = 0;
+        ball_speed_filtered_mm_per_s = 0.0f;
         return false;
     }
 
@@ -142,7 +147,17 @@ bool compute_ball_speed(){
     }
 
     int delta_position_mm = ball_position_mm - ball_position_prev_mm;
-    ball_speed_mm_per_s = (delta_position_mm * 1000) / (int)dt_ms;
+    int raw_speed_mm_per_s = (delta_position_mm * 1000) / (int)dt_ms;
+
+    if(!speed_valid){
+        ball_speed_filtered_mm_per_s = (float)raw_speed_mm_per_s;
+    }
+    else{
+        ball_speed_filtered_mm_per_s += SPEED_FILTER_ALPHA *
+            ((float)raw_speed_mm_per_s - ball_speed_filtered_mm_per_s);
+    }
+
+    ball_speed_mm_per_s = (int)lroundf(ball_speed_filtered_mm_per_s);
 
     ball_position_prev_mm = ball_position_mm;
     last_ball_position_update_ms = now;
