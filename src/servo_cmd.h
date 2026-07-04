@@ -12,7 +12,7 @@ github: jess-lnga
 #include <stdint.h>
 
 #define SERVO_CMD_DEFAULT_PIN 18
-#define SERVO_CMD_NEUTRAL_DEG 93
+#define SERVO_CMD_NEUTRAL_DEG 90
 #define SERVO_CMD_MIN_DEG 0
 #define SERVO_CMD_MAX_DEG 180
 
