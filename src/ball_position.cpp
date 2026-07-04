@@ -50,6 +50,8 @@ static const uint32_t TOF_TIMEOUT_MS = 300;
 
 static uint32_t last_valid_d1_ms = 0;
 static uint32_t last_valid_d2_ms = 0;
+static uint32_t last_processed_d1_ms = 0;
+static uint32_t last_processed_d2_ms = 0;
 
 static bool d1_valid = false;
 static bool d2_valid = false;
@@ -60,22 +62,30 @@ static bool speed_valid = false;
 void update_tof_distances(){
     int staff_d1  = get_mes_tof_1();
     int staff_d2  = get_mes_tof_2();
+    uint32_t tof_1_update_ms = get_tof_1_last_update_ms();
+    uint32_t tof_2_update_ms = get_tof_2_last_update_ms();
 
-    if(staff_d1 >= 0){
+    if(staff_d1 >= 0 &&
+       tof_1_update_ms != 0 &&
+       tof_1_update_ms != last_processed_d1_ms){
         mv_avg_d1[index_mv_avg1] = staff_d1;
         index_mv_avg1 = (index_mv_avg1 + 1) % MV_AVG_LENGTH;
         if (count_d1 < MV_AVG_LENGTH) count_d1++;
 
-        last_valid_d1_ms = millis();
+        last_processed_d1_ms = tof_1_update_ms;
+        last_valid_d1_ms = tof_1_update_ms;
         d1_valid = true;
     }
 
-    if(staff_d2 >= 0){
+    if(staff_d2 >= 0 &&
+       tof_2_update_ms != 0 &&
+       tof_2_update_ms != last_processed_d2_ms){
         mv_avg_d2[index_mv_avg2] = staff_d2;
         index_mv_avg2 = (index_mv_avg2 + 1) % MV_AVG_LENGTH;
         if (count_d2 < MV_AVG_LENGTH) count_d2++;
 
-        last_valid_d2_ms = millis();
+        last_processed_d2_ms = tof_2_update_ms;
+        last_valid_d2_ms = tof_2_update_ms;
         d2_valid = true;
     }
 

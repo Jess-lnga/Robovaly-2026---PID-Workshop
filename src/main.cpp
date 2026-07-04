@@ -12,7 +12,7 @@ github: jess-lnga
 #include "controller.h"
 
 static const uint32_t SERIAL_BAUDRATE = 115200;
-static const uint32_t CONTROLLER_PERIOD_MS = 20;
+static const uint32_t CONTROLLER_PERIOD_MS = 50;
 
 static size_t previous_line_length = 0;
 static int previous_tof1 = INT_MIN;
