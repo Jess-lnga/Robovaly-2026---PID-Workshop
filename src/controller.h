@@ -21,6 +21,7 @@ bool update_controller(void);
 void reset_controller(void);
 void set_controller_enabled(bool enabled);
 bool controller_is_enabled(void);
+bool set_controller_manual_angle(int angle_deg);
 
 void set_controller_reference_mm(int reference_mm);
 int get_controller_reference_mm(void);

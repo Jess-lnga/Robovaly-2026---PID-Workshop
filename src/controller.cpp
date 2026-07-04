@@ -76,8 +76,8 @@ void reset_controller(void) {
     integral_error_mm_s = 0.0f;
     last_update_ms = millis();
     last_update_valid = false;
-    last_angle_deg = SERVO_CMD_NEUTRAL_DEG;
-    filtered_angle_deg = SERVO_CMD_NEUTRAL_DEG;
+    last_angle_deg = servo_cmd_is_initialized() ? get_servo_angle() : SERVO_CMD_NEUTRAL_DEG;
+    filtered_angle_deg = (float)last_angle_deg;
 }
 
 bool update_controller(void) {
@@ -139,14 +139,24 @@ bool update_controller(void) {
 void set_controller_enabled(bool enabled) {
     controller_enabled = enabled;
     reset_controller();
-
-    if(controller_initialized) {
-        set_servo_angle(SERVO_CMD_NEUTRAL_DEG);
-    }
 }
 
 bool controller_is_enabled(void) {
     return controller_enabled;
+}
+
+bool set_controller_manual_angle(int angle_deg) {
+    if(!controller_initialized || controller_enabled) {
+        return false;
+    }
+
+    if(set_servo_angle(angle_deg)) {
+        last_angle_deg = get_servo_angle();
+        filtered_angle_deg = (float)last_angle_deg;
+        return true;
+    }
+
+    return false;
 }
 
 void set_controller_reference_mm(int new_reference_mm) {
