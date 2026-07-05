@@ -11,13 +11,13 @@ static const int TABLE_INCERT_MM = 5;
 
 
 // ------ TOF CALLIBRATION ------
-static const int MAX_VALUE_TOF1_MM = 170;
+static const int MAX_VALUE_TOF1_MM = 260;
 static const int MAX_VALUE_TOF2_MM = 170;
 static const int MIN_VALUE_TOF1_MM = 115; // Not the absolute minimum, but the minimum which shows that we need to only use this tof
 static const int MIN_VALUE_TOF2_MM = 120;
 
 static const int MIN_ACCEPTABLE_TOF_VALUE_MM = 80; //If both tofs give values below this threshold, we consider that there is a problem
-static int tof1_offset_mm = 0;
+static int tof1_offset_mm = -15;
 static int tof2_offset_mm = 0;
 
 

@@ -26,14 +26,14 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PID Table Debug</title>
 <style>
-:root{--bg:#f4f1e8;--ink:#171717;--muted:#666;--line:#202020;--panel:#fffdf6;--red:#c43131;--blue:#2457b8}
+:root{--bg:#f4f1e8;--ink:#171717;--muted:#666;--line:#202020;--panel:#fffdf6;--red:#c43131;--blue:#2457b8;--green:#208444}
 *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font-family:Arial,Helvetica,sans-serif}
 .app{width:min(1180px,100vw);margin:0 auto;padding:10px;display:grid;gap:10px}
 .panel{background:var(--panel);border:3px solid var(--line);border-radius:4px;padding:10px}
 .sceneWrap{height:42vh;min-height:280px;position:relative}.sceneWrap canvas{width:100%;height:100%;display:block}
 .topBtn{position:absolute;top:10px;left:10px;width:52px;height:44px;border:3px solid var(--line);background:#f8f5ea;font-weight:900;font-size:24px}
 .sectionTitle{text-align:center;font-size:25px;font-weight:800;margin:0 0 8px}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.plotBox{height:300px;position:relative}.plotBox canvas{width:100%;height:100%}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.plotBox{height:300px;position:relative}.plotBox canvas{width:100%;height:100%}
 .plotLabel{position:absolute;top:8px;right:50px;font-weight:800;text-decoration:underline}.plotBtn{position:absolute;top:8px;right:8px;width:34px;height:30px;border:3px solid var(--line);background:#f8f5ea;font-weight:900}
 .controls{display:grid;grid-template-columns:1fr 1fr;gap:10px}.formGrid{display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:center}
 label{font-weight:800}.field{height:38px;border:3px solid var(--line);background:white;font-size:18px;padding:3px 8px;width:100%}
@@ -56,6 +56,7 @@ button{cursor:pointer}button:disabled,input:disabled{opacity:.5;cursor:not-allow
     <div class="grid">
       <div class="panel plotBox"><canvas id="anglePlot"></canvas><div class="plotLabel">Angle</div><button class="plotBtn" id="anglePause">||</button></div>
       <div class="panel plotBox"><canvas id="posPlot"></canvas><div class="plotLabel">Pos</div><button class="plotBtn" id="posPause">||</button></div>
+      <div class="panel plotBox"><canvas id="speedPlot"></canvas><div class="plotLabel">Speed</div><button class="plotBtn" id="speedPause">||</button></div>
     </div>
     <div class="small" id="plotInfo">Plot stopped. Press Go to start a 30 s capture.</div>
   </div>
@@ -85,14 +86,14 @@ button{cursor:pointer}button:disabled,input:disabled{opacity:.5;cursor:not-allow
 </div>
 <script>
 const TABLE_LEN_MM=290, REFRESH_MS=55, MAX_PLOT_S=30;
-const scene=document.getElementById('scene'), anglePlot=document.getElementById('anglePlot'), posPlot=document.getElementById('posPlot');
+const scene=document.getElementById('scene'), anglePlot=document.getElementById('anglePlot'), posPlot=document.getElementById('posPlot'), speedPlot=document.getElementById('speedPlot');
 const scenePause=document.getElementById('scenePause'), plotToggle=document.getElementById('plotToggle'), plotInfo=document.getElementById('plotInfo');
-const anglePause=document.getElementById('anglePause'), posPause=document.getElementById('posPause');
+const anglePause=document.getElementById('anglePause'), posPause=document.getElementById('posPause'), speedPause=document.getElementById('speedPause');
 const stabToggle=document.getElementById('stabToggle'), manualSlider=document.getElementById('manualSlider');
 const refInput=document.getElementById('refInput'), kpInput=document.getElementById('kpInput'), kiInput=document.getElementById('kiInput'), kdInput=document.getElementById('kdInput');
 const servoTxt=document.getElementById('servoTxt'), tableTxt=document.getElementById('tableTxt'), xTxt=document.getElementById('xTxt'), vTxt=document.getElementById('vTxt'), d1Txt=document.getElementById('d1Txt'), d2Txt=document.getElementById('d2Txt');
 let state={x:-1,v:0,speed_valid:false,servo_angle:90,stabilization:true,kp:0,ki:0,kd:0,ref:150,d1:-1,d2:-1};
-let sceneFrozen=false, plotRunning=false, angleFrozen=false, posFrozen=false, plotStart=0, angleData=[], posData=[], lastStab=true, editing=false;
+let sceneFrozen=false, plotRunning=false, angleFrozen=false, posFrozen=false, speedFrozen=false, plotStart=0, angleData=[], posData=[], speedData=[], lastStab=true, editing=false;
 function fit(c){const r=c.getBoundingClientRect(),d=window.devicePixelRatio||1;const w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));if(c.width!==w||c.height!==h){c.width=w;c.height=h}}
 function drawScene(){
 fit(scene);
@@ -119,13 +120,61 @@ c.fillText(`x=${state.x} mm`,18,h-44);
 c.fillText(`servo=${state.servo_angle} deg / table=${tableDeg.toFixed(1)} deg`,18,h-20);
 }
 function scaleMax(t){return t<10?10:t<20?20:30}
-function drawPlot(canvas,data,color,label,freeze){fit(canvas);const c=canvas.getContext('2d'),w=canvas.width,h=canvas.height,p=44;c.clearRect(0,0,w,h);c.lineWidth=3;c.strokeStyle='#171717';c.beginPath();c.moveTo(p,12);c.lineTo(p,h-p);c.lineTo(w-12,h-p);c.stroke();const tNow=plotRunning?(performance.now()-plotStart)/1000:(data.length?data[data.length-1].t:0);const xmax=scaleMax(tNow);let vals=data.map(d=>d.y).filter(Number.isFinite);let ymin=label==='pos'?0:0,ymax=label==='pos'?TABLE_LEN_MM:90;if(vals.length&&label!=='pos'){ymin=Math.min(0,...vals)-5;ymax=Math.max(90,...vals)+5;if(ymax-ymin<20){ymin-=10;ymax+=10}}c.strokeStyle='#777';c.lineWidth=1;c.beginPath();let y0=h-p-(0-ymin)/(ymax-ymin)*(h-p-16);if(y0>12&&y0<h-p){c.moveTo(p,y0);c.lineTo(w-12,y0)}c.stroke();c.strokeStyle=color;c.lineWidth=4;c.beginPath();data.forEach((d,i)=>{const x=p+(d.t/xmax)*(w-p-18);const y=h-p-(d.y-ymin)/(ymax-ymin)*(h-p-16);if(i===0)c.moveTo(x,y);else c.lineTo(x,y)});c.stroke();c.fillStyle='#171717';c.font=`${Math.max(12,w*.025)}px Arial`;c.fillText(`${label} | 0-${xmax}s`,p+8,24);if(vals.length)c.fillText(`${vals[vals.length-1].toFixed(1)}`,w-90,24)}
-function drawAll(){if(!sceneFrozen)drawScene();if(!angleFrozen)drawPlot(anglePlot,angleData,'#c43131','angle',false);if(!posFrozen)drawPlot(posPlot,posData,'#2457b8','pos',false)}
+function drawPlot(canvas,data,color,label,freeze){
+fit(canvas);
+const c=canvas.getContext('2d'),w=canvas.width,h=canvas.height,p=44;
+c.clearRect(0,0,w,h);
+c.lineWidth=3;c.strokeStyle='#171717';
+c.beginPath();c.moveTo(p,12);c.lineTo(p,h-p);c.lineTo(w-12,h-p);c.stroke();
+const tNow=plotRunning?(performance.now()-plotStart)/1000:(data.length?data[data.length-1].t:0);
+const xmax=scaleMax(tNow);
+let vals=data.map(d=>d.y).filter(Number.isFinite);
+let ymin=label==='pos'?0:0,ymax=label==='pos'?TABLE_LEN_MM:90;
+if(label==='speed'){
+  const maxAbs=Math.max(100,...vals.map(v=>Math.abs(v)));
+  ymax=Math.ceil(maxAbs/50)*50;
+  ymin=-ymax;
+}
+else if(vals.length&&label!=='pos'){
+  ymin=Math.min(0,...vals)-5;
+  ymax=Math.max(90,...vals)+5;
+  if(ymax-ymin<20){ymin-=10;ymax+=10}
+}
+const yOf=v=>h-p-(v-ymin)/(ymax-ymin)*(h-p-16);
+function dashedRef(value,text){
+  if(value<ymin||value>ymax)return;
+  const y=yOf(value);
+  c.save();
+  c.setLineDash([10,8]);
+  c.strokeStyle='#555';
+  c.lineWidth=2;
+  c.beginPath();c.moveTo(p,y);c.lineTo(w-12,y);c.stroke();
+  c.restore();
+  c.fillStyle='#555';
+  c.font=`${Math.max(11,w*.021)}px Arial`;
+  c.fillText(text,p+8,y-6);
+}
+if(label==='angle')dashedRef(45,'neutral 45 deg');
+if(label==='pos')dashedRef(state.ref,`x0 ${state.ref} mm`);
+if(label==='speed')dashedRef(0,'0 mm/s');
+c.strokeStyle=color;c.lineWidth=4;c.beginPath();
+data.forEach((d,i)=>{
+  const x=p+(d.t/xmax)*(w-p-18);
+  const y=yOf(d.y);
+  if(i===0)c.moveTo(x,y);else c.lineTo(x,y);
+});
+c.stroke();
+c.fillStyle='#171717';
+c.font=`${Math.max(12,w*.025)}px Arial`;
+c.fillText(`${label} | 0-${xmax}s`,p+8,24);
+if(vals.length)c.fillText(`${vals[vals.length-1].toFixed(1)}`,w-90,24);
+}
+function drawAll(){if(!sceneFrozen)drawScene();if(!angleFrozen)drawPlot(anglePlot,angleData,'#c43131','angle',false);if(!posFrozen)drawPlot(posPlot,posData,'#2457b8','pos',false);if(!speedFrozen)drawPlot(speedPlot,speedData,'#208444','speed',false)}
 function updateTexts(){servoTxt.textContent=state.servo_angle;tableTxt.textContent=(state.servo_angle/2).toFixed(1);xTxt.textContent=state.x>=0?state.x:'--';vTxt.textContent=state.speed_valid?state.v:'--';d1Txt.textContent=state.d1>=0?state.d1:'--';d2Txt.textContent=state.d2>=0?state.d2:'--';stabToggle.textContent=state.stabilization?'||':'▶';manualSlider.disabled=state.stabilization;if(!editing){refInput.value=state.ref;kpInput.value=Number(state.kp).toFixed(3);kiInput.value=Number(state.ki).toFixed(3);kdInput.value=Number(state.kd).toFixed(3)}if(lastStab&&!state.stabilization)manualSlider.value=state.servo_angle;lastStab=state.stabilization}
-async function fetchState(){try{const r=await fetch('/api/state',{cache:'no-store'});state=await r.json();updateTexts();if(plotRunning){const t=(performance.now()-plotStart)/1000;if(t<=MAX_PLOT_S){angleData.push({t,y:state.servo_angle/2});posData.push({t,y:state.x>=0?state.x:NaN});plotInfo.textContent=`Plot running: ${t.toFixed(1)} s / 30 s`}else{plotRunning=false;plotToggle.textContent='Go';plotInfo.textContent='30 s reached. Plot stopped.'}}drawAll()}catch(e){}}
-function startPlot(){angleData=[];posData=[];plotStart=performance.now();plotRunning=true;angleFrozen=false;posFrozen=false;plotToggle.textContent='Stop';plotInfo.textContent='Plot running'}
+async function fetchState(){try{const r=await fetch('/api/state',{cache:'no-store'});state=await r.json();updateTexts();if(plotRunning){const t=(performance.now()-plotStart)/1000;if(t<=MAX_PLOT_S){angleData.push({t,y:state.servo_angle/2});posData.push({t,y:state.x>=0?state.x:NaN});speedData.push({t,y:state.speed_valid?state.v:NaN});plotInfo.textContent=`Plot running: ${t.toFixed(1)} s / 30 s`}else{plotRunning=false;plotToggle.textContent='Go';plotInfo.textContent='30 s reached. Plot stopped.'}}drawAll()}catch(e){}}
+function startPlot(){angleData=[];posData=[];speedData=[];plotStart=performance.now();plotRunning=true;angleFrozen=false;posFrozen=false;speedFrozen=false;plotToggle.textContent='Stop';plotInfo.textContent='Plot running'}
 function stopPlot(){plotRunning=false;plotToggle.textContent='Go';plotInfo.textContent='Plot frozen. Press Go to restart from 0.'}
-plotToggle.onclick=()=>plotRunning?stopPlot():startPlot();scenePause.onclick=()=>{sceneFrozen=!sceneFrozen;scenePause.textContent=sceneFrozen?'▶':'||'};anglePause.onclick=()=>{angleFrozen=!angleFrozen;anglePause.textContent=angleFrozen?'▶':'||'};posPause.onclick=()=>{posFrozen=!posFrozen;posPause.textContent=posFrozen?'▶':'||'};
+plotToggle.onclick=()=>plotRunning?stopPlot():startPlot();scenePause.onclick=()=>{sceneFrozen=!sceneFrozen;scenePause.textContent=sceneFrozen?'▶':'||'};anglePause.onclick=()=>{angleFrozen=!angleFrozen;anglePause.textContent=angleFrozen?'▶':'||'};posPause.onclick=()=>{posFrozen=!posFrozen;posPause.textContent=posFrozen?'▶':'||'};speedPause.onclick=()=>{speedFrozen=!speedFrozen;speedPause.textContent=speedFrozen?'▶':'||'};
 stabToggle.onclick=async()=>{const en=state.stabilization?0:1;await fetch(`/api/control?stabilization=${en}`,{cache:'no-store'});if(!en)manualSlider.value=state.servo_angle;fetchState()};
 manualSlider.oninput=()=>{servoTxt.textContent=manualSlider.value;tableTxt.textContent=(Number(manualSlider.value)/2).toFixed(1)};
 manualSlider.onchange=()=>{fetch(`/api/control?angle=${manualSlider.value}`,{cache:'no-store'}).then(fetchState)};
