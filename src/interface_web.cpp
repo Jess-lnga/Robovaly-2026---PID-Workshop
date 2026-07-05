@@ -1,6 +1,7 @@
 #include "interface_web.h"
 
 #include <Arduino.h>
+#include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
 
@@ -14,9 +15,12 @@ static const char *AP_PASS = "robovaly123";
 
 static const BaseType_t WEB_TASK_CORE = 0;
 static const uint32_t WEB_TASK_DELAY_MS = 1;
+static const char *CALIBRATION_NAMESPACE = "tof_cal";
+static const char *CALIBRATION_DONE_KEY = "done";
 
 static WebServer server(80);
 static TaskHandle_t web_task_handle = nullptr;
+static bool distance_sensors_calibrated = false;
 
 static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!doctype html>
@@ -185,6 +189,71 @@ window.onresize=drawAll;setInterval(fetchState,REFRESH_MS);fetchState();
 </html>
 )rawliteral";
 
+static const char CALIBRATION_HTML[] PROGMEM = R"rawliteral(
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Calibration PID Table</title>
+<style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#f4f1e8;color:#171717;font-family:Arial,Helvetica,sans-serif;padding:24px}
+.card{width:min(720px,100%);background:#fffdf6;border:3px solid #202020;border-radius:4px;padding:28px;box-shadow:0 12px 30px rgba(0,0,0,.12)}
+h1{font-size:28px;line-height:1.2;margin:0 0 18px}
+p{font-size:18px;line-height:1.5;margin:0 0 22px}
+button{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:22px;font-weight:900;padding:12px 22px;cursor:pointer}
+button:disabled{opacity:.55;cursor:wait}
+.hint{font-size:14px;color:#666;margin-top:16px}
+</style>
+</head>
+<body>
+<main class="card">
+<h1>Merci d'avoir participe au Workshop PID-TABLE de ROBOVALY.</h1>
+<p>Pour continuer, veuillez callibrer les capteurs de distance du systeme.</p>
+<button id="calibrateBtn">Callibrer</button>
+<div class="hint" id="status">Cette page ne sera plus affichee apres une callibration reussie.</div>
+</main>
+<script>
+const btn=document.getElementById('calibrateBtn');
+const statusEl=document.getElementById('status');
+btn.onclick=async()=>{
+  btn.disabled=true;
+  statusEl.textContent='Callibration en cours...';
+  try{
+    const r=await fetch('/api/calibrate',{cache:'no-store'});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    statusEl.textContent='Callibration reussie. Chargement de l interface...';
+    setTimeout(()=>location.reload(),500);
+  }catch(e){
+    btn.disabled=false;
+    statusEl.textContent='Erreur de callibration. Reessayez.';
+  }
+};
+</script>
+</body>
+</html>
+)rawliteral";
+
+static void apply_test_distance_calibration(void) {
+  set_tof_calibration(TOF1, 145, 145, 0, 72, 145);
+  set_tof_calibration(TOF2, 145, 145, 0, 72, 145);
+}
+
+static bool load_calibration_done(void) {
+  Preferences prefs;
+  prefs.begin(CALIBRATION_NAMESPACE, true);
+  bool done = prefs.getBool(CALIBRATION_DONE_KEY, false);
+  prefs.end();
+  return done;
+}
+
+static void save_calibration_done(bool done) {
+  Preferences prefs;
+  prefs.begin(CALIBRATION_NAMESPACE, false);
+  prefs.putBool(CALIBRATION_DONE_KEY, done);
+  prefs.end();
+}
+
 static void send_state(void) {
   float kp;
   float ki;
@@ -211,14 +280,34 @@ static void send_state(void) {
 
 static void setup_routes(void) {
   server.on("/", HTTP_GET, []() {
-    server.send_P(200, "text/html; charset=utf-8", INDEX_HTML);
+    if (distance_sensors_calibrated) {
+      server.send_P(200, "text/html; charset=utf-8", INDEX_HTML);
+    } else {
+      server.send_P(200, "text/html; charset=utf-8", CALIBRATION_HTML);
+    }
+  });
+
+  server.on("/api/calibrate", HTTP_GET, []() {
+    apply_test_distance_calibration();
+    distance_sensors_calibrated = true;
+    save_calibration_done(true);
+    server.send(200, "application/json; charset=utf-8", "{\"ok\":true}");
   });
 
   server.on("/api/state", HTTP_GET, []() {
+    if (!distance_sensors_calibrated) {
+      server.send(423, "application/json; charset=utf-8", "{\"calibrated\":false}");
+      return;
+    }
     send_state();
   });
 
   server.on("/api/control", HTTP_GET, []() {
+    if (!distance_sensors_calibrated) {
+      server.send(423, "application/json; charset=utf-8", "{\"calibrated\":false}");
+      return;
+    }
+
     if (server.hasArg("stabilization")) {
       set_controller_enabled(server.arg("stabilization").toInt() != 0);
     }
@@ -231,6 +320,11 @@ static void setup_routes(void) {
   });
 
   server.on("/api/params", HTTP_GET, []() {
+    if (!distance_sensors_calibrated) {
+      server.send(423, "application/json; charset=utf-8", "{\"calibrated\":false}");
+      return;
+    }
+
     float kp;
     float ki;
     float kd;
@@ -255,6 +349,11 @@ static void setup_routes(void) {
 
 static void web_task(void *pv) {
   (void)pv;
+
+  distance_sensors_calibrated = load_calibration_done();
+  if (distance_sensors_calibrated) {
+    apply_test_distance_calibration();
+  }
 
   WiFi.mode(WIFI_AP);
   bool ap_ok = WiFi.softAP(AP_SSID, AP_PASS);

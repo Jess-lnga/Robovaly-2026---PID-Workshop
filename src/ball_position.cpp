@@ -24,11 +24,11 @@ static int tof2_offset_mm = 0;
 static bool tof1_calibrated = false;
 static bool tof2_calibrated = false;
 
-static int MEAS_AT_FOV_TOF1 = 0;
-static int MEAS_AT_FOV_TOF2 = 0;
+static int MEAS_AT_FOV_TOF1 = 145;
+static int MEAS_AT_FOV_TOF2 = 145;
 
-static int REAL_DISTANCE_AT_FOV1 = 0;
-static int REAL_DISTANCE_AT_FOV2 = 0;
+static int REAL_DISTANCE_AT_FOV1 = 145;
+static int REAL_DISTANCE_AT_FOV2 = 145;
 
 static int MEAS_AT_000_MM_TOF1 = 0;
 static int MEAS_AT_072_MM_TOF1 = 0;
