@@ -10,6 +10,7 @@ github: jess-lnga
 
 #define TOF1 1
 #define TOF2 2
+#define INFINITE_TOF_VALUE 9999
 
 void update_tof_distances();
 bool compute_ball_position();
@@ -23,7 +24,7 @@ bool is_ball_speed_valid();
 
 void display_distances();
 
-void set_tof_calibration(int tof_number, int fov, int real_distance_at_fov, 
+bool set_tof_calibration(int tof_number, int fov, int real_distance_at_fov, 
                     int meas_at_000_mm, int meas_at_072_mm, int meas_at_145_mm);
     
 

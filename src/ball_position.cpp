@@ -31,12 +31,12 @@ static int REAL_DISTANCE_AT_FOV1 = 145;
 static int REAL_DISTANCE_AT_FOV2 = 145;
 
 static int MEAS_AT_000_MM_TOF1 = 0;
-static int MEAS_AT_072_MM_TOF1 = 0;
-static int MEAS_AT_145_MM_TOF1 = 0;
+static int MEAS_AT_072_MM_TOF1 = INFINITE_TOF_VALUE;
+static int MEAS_AT_145_MM_TOF1 = INFINITE_TOF_VALUE;
 
 static int MEAS_AT_000_MM_TOF2 = 0;
-static int MEAS_AT_072_MM_TOF2 = 0;
-static int MEAS_AT_145_MM_TOF2 = 0;
+static int MEAS_AT_072_MM_TOF2 = INFINITE_TOF_VALUE;
+static int MEAS_AT_145_MM_TOF2 = INFINITE_TOF_VALUE;
 
 
 static bool fov1_greater_than_145_mm = false;
@@ -163,16 +163,18 @@ int linearise_tof_measure(int tof_number, int meas){
 
 }
 
-void set_tof_calibration(int tof_number, int fov, int real_distance_at_fov, 
+bool set_tof_calibration(int tof_number, int fov, int real_distance_at_fov, 
                     int meas_at_000_mm, int meas_at_072_mm, int meas_at_145_mm){
-    
+    bool calibration_valid = false;
     
     if((meas_at_000_mm <= meas_at_072_mm) && (meas_at_072_mm <= meas_at_145_mm)){
         if(tof_number == TOF1){
             tof1_calibrated = true;
+            calibration_valid = true;
         }
         else if(tof_number == TOF2){
             tof2_calibrated = true;
+            calibration_valid = true;
         }
     }
     else{
@@ -207,6 +209,8 @@ void set_tof_calibration(int tof_number, int fov, int real_distance_at_fov,
         fov2_greater_than_072_mm = (real_distance_at_fov > 72);
         fov2_greater_than_000_mm = (real_distance_at_fov > 0);
     }
+
+    return calibration_valid;
 }
 
 

@@ -17,10 +17,40 @@ static const BaseType_t WEB_TASK_CORE = 0;
 static const uint32_t WEB_TASK_DELAY_MS = 1;
 static const char *CALIBRATION_NAMESPACE = "tof_cal";
 static const char *CALIBRATION_DONE_KEY = "done";
+static const char *CALIBRATION_VERSION_KEY = "version";
+static const uint32_t CALIBRATION_SCHEMA_VERSION = 2;
 
 static WebServer server(80);
 static TaskHandle_t web_task_handle = nullptr;
 static bool distance_sensors_calibrated = false;
+
+enum CalibrationStep {
+  CAL_TOF1_FIND_FOV,
+  CAL_TOF1_ENTER_FOV_DISTANCE,
+  CAL_TOF1_PLACE_145,
+  CAL_TOF1_PLACE_72,
+  CAL_TOF1_PLACE_0,
+  CAL_TOF2_FIND_FOV,
+  CAL_TOF2_ENTER_FOV_DISTANCE,
+  CAL_TOF2_PLACE_145,
+  CAL_TOF2_PLACE_72,
+  CAL_TOF2_PLACE_0,
+  CAL_VERIFY,
+  CAL_ERROR,
+};
+
+struct TofCalibrationDraft {
+  int meas_fov = INFINITE_TOF_VALUE;
+  int real_fov = 145;
+  int meas_0 = 0;
+  int meas_72 = INFINITE_TOF_VALUE;
+  int meas_145 = INFINITE_TOF_VALUE;
+};
+
+static TofCalibrationDraft calibration_tof1;
+static TofCalibrationDraft calibration_tof2;
+static CalibrationStep calibration_step = CAL_TOF1_FIND_FOV;
+static String calibration_error_msg = "";
 
 static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!doctype html>
@@ -197,61 +227,264 @@ static const char CALIBRATION_HTML[] PROGMEM = R"rawliteral(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Calibration PID Table</title>
 <style>
-body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#f4f1e8;color:#171717;font-family:Arial,Helvetica,sans-serif;padding:24px}
-.card{width:min(720px,100%);background:#fffdf6;border:3px solid #202020;border-radius:4px;padding:28px;box-shadow:0 12px 30px rgba(0,0,0,.12)}
-h1{font-size:28px;line-height:1.2;margin:0 0 18px}
-p{font-size:18px;line-height:1.5;margin:0 0 22px}
-button{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:22px;font-weight:900;padding:12px 22px;cursor:pointer}
-button:disabled{opacity:.55;cursor:wait}
-.hint{font-size:14px;color:#666;margin-top:16px}
+body{margin:0;min-height:100vh;background:#f4f1e8;color:#171717;font-family:Arial,Helvetica,sans-serif;padding:14px}
+.app{width:min(1000px,100%);margin:0 auto;display:grid;gap:12px}.panel{background:#fffdf6;border:3px solid #202020;border-radius:4px;padding:16px}
+h1{font-size:25px;line-height:1.2;margin:0 0 10px}.msg{font-size:18px;line-height:1.45;margin:0 0 12px}.scene{height:330px;position:relative}.scene canvas{width:100%;height:100%;display:block}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.dot{width:18px;height:18px;border-radius:50%;background:#b91c1c;border:2px solid #202020}.ok{background:#1f8f45}.bad{background:#b91c1c}
+button{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:20px;font-weight:900;padding:10px 18px;cursor:pointer}button:disabled{opacity:.55;cursor:wait}
+input{height:42px;border:3px solid #202020;background:white;font-size:20px;padding:4px 8px;width:160px}.hint{font-size:14px;color:#666}.hidden{display:none}.err{color:#b91c1c;font-weight:800}
 </style>
 </head>
 <body>
-<main class="card">
+<div class="app">
+<section class="panel">
 <h1>Merci d'avoir participe au Workshop PID-TABLE de ROBOVALY.</h1>
-<p>Pour continuer, veuillez callibrer les capteurs de distance du systeme.</p>
-<button id="calibrateBtn">Callibrer</button>
-<div class="hint" id="status">Cette page ne sera plus affichee apres une callibration reussie.</div>
-</main>
+<p class="msg">Pour continuer, veuillez callibrer les capteurs de distance du systeme.</p>
+<div class="row"><span class="dot" id="dot"></span><b id="rawTxt">--</b><span id="tofTxt">--</span></div>
+</section>
+<section class="panel scene"><canvas id="calScene"></canvas></section>
+<section class="panel">
+<h1 id="title">Calibration</h1>
+<p class="msg" id="instruction">Chargement...</p>
+<div class="row" id="realRow"><label for="realInput"><b>Distance reelle au FOV max</b></label><input id="realInput" type="number" min="1" max="400" step="1"><span>mm</span></div>
+<div class="row">
+<button id="doneBtn">Done</button>
+<button id="submitBtn">Valider distance</button>
+<button id="acceptBtn">Valider calibration</button>
+<button id="restartBtn">Restart</button>
+</div>
+<div class="hint" id="status">Les valeurs sont sauvegardees apres validation finale.</div>
+</section>
+</div>
 <script>
-const btn=document.getElementById('calibrateBtn');
-const statusEl=document.getElementById('status');
-btn.onclick=async()=>{
-  btn.disabled=true;
-  statusEl.textContent='Callibration en cours...';
-  try{
-    const r=await fetch('/api/calibrate',{cache:'no-store'});
-    if(!r.ok)throw new Error('HTTP '+r.status);
-    statusEl.textContent='Callibration reussie. Chargement de l interface...';
-    setTimeout(()=>location.reload(),500);
-  }catch(e){
-    btn.disabled=false;
-    statusEl.textContent='Erreur de callibration. Reessayez.';
-  }
-};
+const TABLE_LEN_MM=290, REFRESH_MS=80;
+const scene=document.getElementById('calScene'),dot=document.getElementById('dot'),rawTxt=document.getElementById('rawTxt'),tofTxt=document.getElementById('tofTxt');
+const title=document.getElementById('title'),instruction=document.getElementById('instruction'),statusEl=document.getElementById('status');
+const realRow=document.getElementById('realRow'),realInput=document.getElementById('realInput');
+const doneBtn=document.getElementById('doneBtn'),submitBtn=document.getElementById('submitBtn'),acceptBtn=document.getElementById('acceptBtn'),restartBtn=document.getElementById('restartBtn');
+let s={};
+function fit(c){const r=c.getBoundingClientRect(),d=window.devicePixelRatio||1;const w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));if(c.width!==w||c.height!==h){c.width=w;c.height=h}}
+function drawScene(){
+fit(scene);const c=scene.getContext('2d'),w=scene.width,h=scene.height;c.clearRect(0,0,w,h);c.lineWidth=4;c.strokeStyle='#171717';c.fillStyle='#171717';
+const cx=w*.5,cy=h*.56,len=w*.72,a=0,ux=Math.cos(a),uy=Math.sin(a),nx=0,ny=-1;const x1=cx-len/2,y1=cy,x2=cx+len/2,y2=cy;
+c.beginPath();c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke();c.beginPath();c.moveTo(cx,cy+8);c.lineTo(cx-w*.035,cy+h*.22);c.lineTo(cx+w*.035,cy+h*.22);c.closePath();c.stroke();
+let pos=s.visual_pos_mm; if(!Number.isFinite(pos)||pos<0)pos=TABLE_LEN_MM/2; pos=Math.max(0,Math.min(TABLE_LEN_MM,pos)); const p=pos/TABLE_LEN_MM;
+const r=Math.max(15,Math.min(w,h)*.045),contactX=x1+(x2-x1)*p,contactY=y1+(y2-y1)*p,bx=contactX+nx*r,by=contactY+ny*r;
+c.beginPath();c.arc(bx,by,r,0,Math.PI*2);c.stroke();c.beginPath();c.moveTo(bx-r*.65,by-r*.65);c.lineTo(bx+r*.65,by+r*.65);c.moveTo(bx+r*.65,by-r*.65);c.lineTo(bx-r*.65,by+r*.65);c.stroke();
+if(s.step==='verify'){[0,72,145].forEach(mm=>{const x=x1+(x2-x1)*(mm/TABLE_LEN_MM);c.strokeStyle='#208444';c.fillStyle='#208444';c.lineWidth=3;c.beginPath();c.moveTo(x,cy+30);c.lineTo(x,cy+70);c.stroke();c.beginPath();c.moveTo(x,cy+24);c.lineTo(x-8,cy+42);c.lineTo(x+8,cy+42);c.closePath();c.fill();c.fillText(`${mm}`,x-10,cy+90)});c.strokeStyle='#171717';c.fillStyle='#171717'}
+c.font=`${Math.max(14,w*.018)}px Arial`;c.fillText(`visual pos=${Math.round(pos)} mm`,18,h-22);
+}
+function setButtons(){
+doneBtn.classList.toggle('hidden',!s.needs_done);
+submitBtn.classList.toggle('hidden',!s.needs_real_input);
+realRow.classList.toggle('hidden',!s.needs_real_input);
+acceptBtn.classList.toggle('hidden',s.step!=='verify');
+restartBtn.classList.toggle('hidden',false);
+if(s.needs_real_input && !realInput.value)realInput.value=s.real_fov||145;
+}
+function update(){
+title.textContent=s.title||'Calibration';
+instruction.textContent=s.instruction||'';
+rawTxt.textContent=s.raw_valid?`raw=${s.raw_mm} mm`:'raw invalid';
+tofTxt.textContent=s.tof?`TOF ${s.tof}`:'';
+dot.className='dot '+(s.raw_valid?'ok':'bad');
+if(s.error)statusEl.innerHTML=`<span class="err">${s.error}</span>`;else statusEl.textContent=s.status||'';
+setButtons();drawScene();
+}
+async function getState(){try{const r=await fetch('/api/calibration/state',{cache:'no-store'});s=await r.json();update()}catch(e){statusEl.textContent='Erreur reseau'}}
+async function action(q){doneBtn.disabled=submitBtn.disabled=acceptBtn.disabled=restartBtn.disabled=true;try{const r=await fetch('/api/calibration/action?'+q,{cache:'no-store'});s=await r.json();update();if(s.done)setTimeout(()=>location.reload(),600)}catch(e){statusEl.textContent='Erreur action'}doneBtn.disabled=submitBtn.disabled=acceptBtn.disabled=restartBtn.disabled=false}
+doneBtn.onclick=()=>action('cmd=done');
+submitBtn.onclick=()=>action('cmd=real_fov&value='+encodeURIComponent(realInput.value||'145'));
+acceptBtn.onclick=()=>action('cmd=accept');
+restartBtn.onclick=()=>action('cmd=restart');
+window.onresize=drawScene;setInterval(getState,REFRESH_MS);getState();
 </script>
 </body>
 </html>
 )rawliteral";
 
-static void apply_test_distance_calibration(void) {
-  set_tof_calibration(TOF1, 145, 145, 0, 72, 145);
-  set_tof_calibration(TOF2, 145, 145, 0, 72, 145);
+static TofCalibrationDraft &draft_for_tof(int tof_number) {
+  return (tof_number == TOF1) ? calibration_tof1 : calibration_tof2;
 }
 
-static bool load_calibration_done(void) {
+static int current_calibration_tof(void) {
+  switch (calibration_step) {
+    case CAL_TOF1_FIND_FOV:
+    case CAL_TOF1_ENTER_FOV_DISTANCE:
+    case CAL_TOF1_PLACE_145:
+    case CAL_TOF1_PLACE_72:
+    case CAL_TOF1_PLACE_0:
+      return TOF1;
+
+    case CAL_TOF2_FIND_FOV:
+    case CAL_TOF2_ENTER_FOV_DISTANCE:
+    case CAL_TOF2_PLACE_145:
+    case CAL_TOF2_PLACE_72:
+    case CAL_TOF2_PLACE_0:
+      return TOF2;
+
+    default:
+      return 0;
+  }
+}
+
+static int raw_tof_value(int tof_number) {
+  return (tof_number == TOF1) ? get_mes_tof_1() : get_mes_tof_2();
+}
+
+static uint32_t raw_tof_timestamp(int tof_number) {
+  return (tof_number == TOF1) ? get_tof_1_last_update_ms() : get_tof_2_last_update_ms();
+}
+
+static bool raw_tof_is_valid(int value) {
+  return value >= 0 && value <= 290;
+}
+
+static int visual_position_from_raw(int tof_number, int raw_mm) {
+  if (!raw_tof_is_valid(raw_mm)) {
+    return -1;
+  }
+
+  return (tof_number == TOF1) ? 290 - raw_mm : raw_mm;
+}
+
+static bool capture_raw_average(int tof_number, int *average_mm) {
+  static const int SAMPLE_COUNT = 8;
+  static const uint32_t CAPTURE_TIMEOUT_MS = 1600;
+
+  int sum = 0;
+  int count = 0;
+  uint32_t last_seen_ms = 0;
+  uint32_t start_ms = millis();
+
+  while (millis() - start_ms < CAPTURE_TIMEOUT_MS && count < SAMPLE_COUNT) {
+    int value = raw_tof_value(tof_number);
+    uint32_t timestamp = raw_tof_timestamp(tof_number);
+
+    if (timestamp != 0 && timestamp != last_seen_ms && raw_tof_is_valid(value)) {
+      sum += value;
+      count++;
+      last_seen_ms = timestamp;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(15));
+  }
+
+  if (count == 0) {
+    return false;
+  }
+
+  *average_mm = (int)lroundf((float)sum / (float)count);
+  return true;
+}
+
+static bool apply_draft_calibration(int tof_number) {
+  TofCalibrationDraft &draft = draft_for_tof(tof_number);
+  return set_tof_calibration(tof_number,
+                             draft.meas_fov,
+                             draft.real_fov,
+                             draft.meas_0,
+                             draft.meas_72,
+                             draft.meas_145);
+}
+
+static void reset_calibration_drafts(void) {
+  calibration_tof1 = TofCalibrationDraft();
+  calibration_tof2 = TofCalibrationDraft();
+  calibration_step = CAL_TOF1_FIND_FOV;
+  calibration_error_msg = "";
+  distance_sensors_calibrated = false;
+}
+
+static void save_draft_to_preferences(void) {
+  Preferences prefs;
+  prefs.begin(CALIBRATION_NAMESPACE, false);
+  prefs.putBool(CALIBRATION_DONE_KEY, true);
+  prefs.putUInt(CALIBRATION_VERSION_KEY, CALIBRATION_SCHEMA_VERSION);
+  prefs.putInt("t1_mf", calibration_tof1.meas_fov);
+  prefs.putInt("t1_rf", calibration_tof1.real_fov);
+  prefs.putInt("t1_m0", calibration_tof1.meas_0);
+  prefs.putInt("t1_m72", calibration_tof1.meas_72);
+  prefs.putInt("t1_m145", calibration_tof1.meas_145);
+  prefs.putInt("t2_mf", calibration_tof2.meas_fov);
+  prefs.putInt("t2_rf", calibration_tof2.real_fov);
+  prefs.putInt("t2_m0", calibration_tof2.meas_0);
+  prefs.putInt("t2_m72", calibration_tof2.meas_72);
+  prefs.putInt("t2_m145", calibration_tof2.meas_145);
+  prefs.end();
+}
+
+static bool load_draft_from_preferences(void) {
   Preferences prefs;
   prefs.begin(CALIBRATION_NAMESPACE, true);
   bool done = prefs.getBool(CALIBRATION_DONE_KEY, false);
+  uint32_t version = prefs.getUInt(CALIBRATION_VERSION_KEY, 0);
+  bool compatible_calibration = done && (version == CALIBRATION_SCHEMA_VERSION);
+
+  if (compatible_calibration) {
+    calibration_tof1.meas_fov = prefs.getInt("t1_mf", 145);
+    calibration_tof1.real_fov = prefs.getInt("t1_rf", 145);
+    calibration_tof1.meas_0 = prefs.getInt("t1_m0", 0);
+    calibration_tof1.meas_72 = prefs.getInt("t1_m72", INFINITE_TOF_VALUE);
+    calibration_tof1.meas_145 = prefs.getInt("t1_m145", INFINITE_TOF_VALUE);
+    calibration_tof2.meas_fov = prefs.getInt("t2_mf", 145);
+    calibration_tof2.real_fov = prefs.getInt("t2_rf", 145);
+    calibration_tof2.meas_0 = prefs.getInt("t2_m0", 0);
+    calibration_tof2.meas_72 = prefs.getInt("t2_m72", INFINITE_TOF_VALUE);
+    calibration_tof2.meas_145 = prefs.getInt("t2_m145", INFINITE_TOF_VALUE);
+  }
+
   prefs.end();
-  return done;
+  return compatible_calibration;
+}
+
+static bool load_calibration_done(void) {
+  return load_draft_from_preferences();
 }
 
 static void save_calibration_done(bool done) {
   Preferences prefs;
   prefs.begin(CALIBRATION_NAMESPACE, false);
   prefs.putBool(CALIBRATION_DONE_KEY, done);
+  prefs.putUInt(CALIBRATION_VERSION_KEY, done ? CALIBRATION_SCHEMA_VERSION : 0);
   prefs.end();
+}
+
+static bool should_calibrate_target(const TofCalibrationDraft &draft, int target_mm) {
+  return draft.real_fov > target_mm;
+}
+
+static CalibrationStep next_step_after_fov_distance(int tof_number) {
+  TofCalibrationDraft &draft = draft_for_tof(tof_number);
+
+  if (should_calibrate_target(draft, 145)) {
+    return (tof_number == TOF1) ? CAL_TOF1_PLACE_145 : CAL_TOF2_PLACE_145;
+  }
+
+  if (should_calibrate_target(draft, 72)) {
+    return (tof_number == TOF1) ? CAL_TOF1_PLACE_72 : CAL_TOF2_PLACE_72;
+  }
+
+  return (tof_number == TOF1) ? CAL_TOF1_PLACE_0 : CAL_TOF2_PLACE_0;
+}
+
+static CalibrationStep next_step_after_target(int tof_number, int completed_target_mm) {
+  TofCalibrationDraft &draft = draft_for_tof(tof_number);
+
+  if (completed_target_mm == 145 && should_calibrate_target(draft, 72)) {
+    return (tof_number == TOF1) ? CAL_TOF1_PLACE_72 : CAL_TOF2_PLACE_72;
+  }
+
+  if (completed_target_mm == 145 || completed_target_mm == 72) {
+    return (tof_number == TOF1) ? CAL_TOF1_PLACE_0 : CAL_TOF2_PLACE_0;
+  }
+
+  if (apply_draft_calibration(tof_number)) {
+    return (tof_number == TOF1) ? CAL_TOF2_FIND_FOV : CAL_VERIFY;
+  }
+
+  calibration_error_msg = (tof_number == TOF1) ? "Calibration TOF 1 invalide." : "Calibration TOF 2 invalide.";
+  return CAL_ERROR;
 }
 
 static void send_state(void) {
@@ -278,6 +511,200 @@ static void send_state(void) {
   server.send(200, "application/json; charset=utf-8", json);
 }
 
+static void send_calibration_state(void) {
+  int tof_number = current_calibration_tof();
+  int raw_mm = (tof_number == 0) ? -1 : raw_tof_value(tof_number);
+  bool raw_valid = raw_tof_is_valid(raw_mm);
+  int visual_pos = (calibration_step == CAL_VERIFY) ? get_ball_position()
+                                                   : visual_position_from_raw(tof_number, raw_mm);
+
+  const char *step_name = "unknown";
+  const char *title = "Calibration";
+  const char *instruction = "";
+  bool needs_done = false;
+  bool needs_real_input = false;
+  int real_fov = 145;
+
+  switch (calibration_step) {
+    case CAL_TOF1_FIND_FOV:
+      step_name = "tof1_fov";
+      title = "TOF 1 - Find TOF's FOV";
+      instruction = "Eloignez progressivement la balle du TOF 1. Quand la linearite disparait ou que la mesure devient limite, cliquez sur Done.";
+      needs_done = true;
+      break;
+    case CAL_TOF1_ENTER_FOV_DISTANCE:
+      step_name = "tof1_real_fov";
+      title = "TOF 1 - Distance reelle au FOV";
+      instruction = "Mesurez avec une regle la vraie distance de la balle au TOF 1, puis entrez la valeur en mm.";
+      needs_real_input = true;
+      real_fov = calibration_tof1.real_fov;
+      break;
+    case CAL_TOF1_PLACE_145:
+      step_name = "tof1_145";
+      title = "TOF 1 - Point 145 mm";
+      instruction = "Placez la balle a 145 mm du TOF 1. Quand elle est stable, cliquez sur Done.";
+      needs_done = true;
+      break;
+    case CAL_TOF1_PLACE_72:
+      step_name = "tof1_72";
+      title = "TOF 1 - Point 72 mm";
+      instruction = "Placez la balle a 72 mm du TOF 1. Quand elle est stable, cliquez sur Done.";
+      needs_done = true;
+      break;
+    case CAL_TOF1_PLACE_0:
+      step_name = "tof1_0";
+      title = "TOF 1 - Point 0 mm";
+      instruction = "Placez la balle a 0 mm du TOF 1. Quand elle est stable, cliquez sur Done.";
+      needs_done = true;
+      break;
+    case CAL_TOF2_FIND_FOV:
+      step_name = "tof2_fov";
+      title = "TOF 2 - Find TOF's FOV";
+      instruction = "Eloignez progressivement la balle du TOF 2. Quand la linearite disparait ou que la mesure devient limite, cliquez sur Done.";
+      needs_done = true;
+      break;
+    case CAL_TOF2_ENTER_FOV_DISTANCE:
+      step_name = "tof2_real_fov";
+      title = "TOF 2 - Distance reelle au FOV";
+      instruction = "Mesurez avec une regle la vraie distance de la balle au TOF 2, puis entrez la valeur en mm.";
+      needs_real_input = true;
+      real_fov = calibration_tof2.real_fov;
+      break;
+    case CAL_TOF2_PLACE_145:
+      step_name = "tof2_145";
+      title = "TOF 2 - Point 145 mm";
+      instruction = "Placez la balle a 145 mm du TOF 2. Quand elle est stable, cliquez sur Done.";
+      needs_done = true;
+      break;
+    case CAL_TOF2_PLACE_72:
+      step_name = "tof2_72";
+      title = "TOF 2 - Point 72 mm";
+      instruction = "Placez la balle a 72 mm du TOF 2. Quand elle est stable, cliquez sur Done.";
+      needs_done = true;
+      break;
+    case CAL_TOF2_PLACE_0:
+      step_name = "tof2_0";
+      title = "TOF 2 - Point 0 mm";
+      instruction = "Placez la balle a 0 mm du TOF 2. Quand elle est stable, cliquez sur Done.";
+      needs_done = true;
+      break;
+    case CAL_VERIFY:
+      step_name = "verify";
+      title = "Verification de la calibration";
+      instruction = "Verifiez que la position calibree est coherente. Les fleches vertes indiquent 0, 72 et 145 mm. Validez si tout est correct.";
+      tof_number = 0;
+      break;
+    case CAL_ERROR:
+      step_name = "error";
+      title = "Erreur de calibration";
+      instruction = "La calibration a echoue. Cliquez sur Restart pour recommencer.";
+      tof_number = 0;
+      break;
+  }
+
+  String json = "{";
+  json += "\"step\":\"" + String(step_name) + "\",";
+  json += "\"title\":\"" + String(title) + "\",";
+  json += "\"instruction\":\"" + String(instruction) + "\",";
+  json += "\"tof\":" + String(tof_number) + ",";
+  json += "\"raw_mm\":" + String(raw_mm) + ",";
+  json += "\"raw_valid\":" + String(raw_valid ? "true" : "false") + ",";
+  json += "\"visual_pos_mm\":" + String(visual_pos) + ",";
+  json += "\"needs_done\":" + String(needs_done ? "true" : "false") + ",";
+  json += "\"needs_real_input\":" + String(needs_real_input ? "true" : "false") + ",";
+  json += "\"real_fov\":" + String(real_fov) + ",";
+  json += "\"status\":\"Calibration non finalisee\",";
+  json += "\"error\":\"" + calibration_error_msg + "\",";
+  json += "\"done\":" + String(distance_sensors_calibrated ? "true" : "false");
+  json += "}";
+
+  server.send(200, "application/json; charset=utf-8", json);
+}
+
+static void handle_calibration_action(void) {
+  String cmd = server.arg("cmd");
+  calibration_error_msg = "";
+
+  if (cmd == "restart") {
+    reset_calibration_drafts();
+    save_calibration_done(false);
+    send_calibration_state();
+    return;
+  }
+
+  if (cmd == "accept" && calibration_step == CAL_VERIFY) {
+    save_draft_to_preferences();
+    distance_sensors_calibrated = true;
+    send_calibration_state();
+    return;
+  }
+
+  if (cmd == "real_fov") {
+    int tof_number = current_calibration_tof();
+    int real_fov = server.arg("value").toInt();
+
+    if (tof_number == 0 || real_fov <= 0) {
+      calibration_error_msg = "Distance FOV invalide.";
+      send_calibration_state();
+      return;
+    }
+
+    draft_for_tof(tof_number).real_fov = real_fov;
+    calibration_step = next_step_after_fov_distance(tof_number);
+    send_calibration_state();
+    return;
+  }
+
+  if (cmd == "done") {
+    int tof_number = current_calibration_tof();
+    int average_mm = -1;
+
+    if (tof_number == 0 || !capture_raw_average(tof_number, &average_mm)) {
+      calibration_error_msg = "Impossible de moyenner une mesure brute valide.";
+      send_calibration_state();
+      return;
+    }
+
+    TofCalibrationDraft &draft = draft_for_tof(tof_number);
+
+    switch (calibration_step) {
+      case CAL_TOF1_FIND_FOV:
+      case CAL_TOF2_FIND_FOV:
+        draft.meas_fov = average_mm;
+        calibration_step = (tof_number == TOF1) ? CAL_TOF1_ENTER_FOV_DISTANCE : CAL_TOF2_ENTER_FOV_DISTANCE;
+        break;
+
+      case CAL_TOF1_PLACE_145:
+      case CAL_TOF2_PLACE_145:
+        draft.meas_145 = average_mm;
+        calibration_step = next_step_after_target(tof_number, 145);
+        break;
+
+      case CAL_TOF1_PLACE_72:
+      case CAL_TOF2_PLACE_72:
+        draft.meas_72 = average_mm;
+        calibration_step = next_step_after_target(tof_number, 72);
+        break;
+
+      case CAL_TOF1_PLACE_0:
+      case CAL_TOF2_PLACE_0:
+        draft.meas_0 = average_mm;
+        calibration_step = next_step_after_target(tof_number, 0);
+        break;
+
+      default:
+        calibration_error_msg = "Action Done impossible a cette etape.";
+        break;
+    }
+
+    send_calibration_state();
+    return;
+  }
+
+  calibration_error_msg = "Commande de calibration inconnue.";
+  send_calibration_state();
+}
+
 static void setup_routes(void) {
   server.on("/", HTTP_GET, []() {
     if (distance_sensors_calibrated) {
@@ -287,11 +714,20 @@ static void setup_routes(void) {
     }
   });
 
+  server.on("/calibration", HTTP_GET, []() {
+    server.send_P(200, "text/html; charset=utf-8", CALIBRATION_HTML);
+  });
+
   server.on("/api/calibrate", HTTP_GET, []() {
-    apply_test_distance_calibration();
-    distance_sensors_calibrated = true;
-    save_calibration_done(true);
-    server.send(200, "application/json; charset=utf-8", "{\"ok\":true}");
+    handle_calibration_action();
+  });
+
+  server.on("/api/calibration/state", HTTP_GET, []() {
+    send_calibration_state();
+  });
+
+  server.on("/api/calibration/action", HTTP_GET, []() {
+    handle_calibration_action();
   });
 
   server.on("/api/state", HTTP_GET, []() {
@@ -352,7 +788,8 @@ static void web_task(void *pv) {
 
   distance_sensors_calibrated = load_calibration_done();
   if (distance_sensors_calibrated) {
-    apply_test_distance_calibration();
+    apply_draft_calibration(TOF1);
+    apply_draft_calibration(TOF2);
   }
 
   WiFi.mode(WIFI_AP);
