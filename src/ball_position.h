@@ -23,7 +23,9 @@ bool is_ball_speed_valid();
 
 void display_distances();
 
-bool calibration(int mode, int value);
+void set_tof_calibration(int tof_number, int fov, int real_distance_at_fov, 
+                    int meas_at_000_mm, int meas_at_072_mm, int meas_at_145_mm);
+    
 
 
 #endif // BALL_POS_H

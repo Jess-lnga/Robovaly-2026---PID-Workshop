@@ -21,9 +21,14 @@ static int tof1_offset_mm = -15;
 static int tof2_offset_mm = 0;
 
 // ------- BETTER TOF CALIBRATION -------
+static bool tof1_calibrated = false;
+static bool tof2_calibrated = false;
 
-static int FOV1 = 0;
-static int FOV2 = 0;
+static int MEAS_AT_FOV_TOF1 = 0;
+static int MEAS_AT_FOV_TOF2 = 0;
+
+static int REAL_DISTANCE_AT_FOV1 = 0;
+static int REAL_DISTANCE_AT_FOV2 = 0;
 
 static int MEAS_AT_000_MM_TOF1 = 0;
 static int MEAS_AT_072_MM_TOF1 = 0;
@@ -34,7 +39,13 @@ static int MEAS_AT_072_MM_TOF2 = 0;
 static int MEAS_AT_145_MM_TOF2 = 0;
 
 
+static bool fov1_greater_than_145_mm = false;
+static bool fov1_greater_than_072_mm = false;
+static bool fov1_greater_than_000_mm = false;
 
+static bool fov2_greater_than_145_mm = false;
+static bool fov2_greater_than_072_mm = false;  
+static bool fov2_greater_than_000_mm = false;
 
 
 // ------ MOVING AVERAGES ------
@@ -77,32 +88,128 @@ static bool speed_valid = false;
 
 //////////////////////////////////////
 
+static const int EPSILON = 1;   
 int linearise_measure(int min_meas, int min_val, int max_meas, int max_val, int meas){
+    if(abs(min_meas - max_meas) < EPSILON){
+        return min_val;
+    }
+
     float slope = (float)(max_val - min_val) / (float)(max_meas - min_meas);
     float intercept = (float)min_val - slope * (float)min_meas;
 
     return (int)lroundf(slope * (float)meas + intercept);
 }
 
-void set_tof_calibration(int tof_number, int fov, int meas_at_000_mm, int meas_at_072_mm, int meas_at_145_mm){
+int linearise_tof_measure(int tof_number, int meas){
     if(tof_number == TOF1){
-        FOV1 = fov;
-        MEAS_AT_000_MM_TOF1 = meas_at_000_mm;
-        MEAS_AT_072_MM_TOF1 = meas_at_072_mm;
-        MEAS_AT_145_MM_TOF1 = meas_at_145_mm;
+        if (!tof1_calibrated) return -1;
+
+        if(meas > MEAS_AT_FOV_TOF1) {return -1;}
+
+        if(meas > MEAS_AT_145_MM_TOF1) {
+            return linearise_measure(MEAS_AT_145_MM_TOF1, 145, MEAS_AT_FOV_TOF1, REAL_DISTANCE_AT_FOV1, meas);
+        
+        }else if(meas > MEAS_AT_072_MM_TOF1) {
+            if(fov1_greater_than_145_mm){
+                return linearise_measure(MEAS_AT_072_MM_TOF1, 72, MEAS_AT_145_MM_TOF1, 145, meas);
+            }else{
+                return linearise_measure(MEAS_AT_072_MM_TOF1, 72, MEAS_AT_FOV_TOF1, REAL_DISTANCE_AT_FOV1, meas);
+            }
+        
+        }else if(meas > MEAS_AT_000_MM_TOF1) {
+            if(fov1_greater_than_072_mm){
+                return linearise_measure(MEAS_AT_000_MM_TOF1, 0, MEAS_AT_072_MM_TOF1, 72, meas);
+            }else{
+                return linearise_measure(MEAS_AT_000_MM_TOF1, 0, MEAS_AT_FOV_TOF1, REAL_DISTANCE_AT_FOV1, meas);
+            }
+        }else if(meas > 0){
+            return 0;
+
+        }else {
+            return -1;
+        }
+
+    } else if(tof_number == TOF2){
+        if (!tof2_calibrated) return -1;
+
+        if(meas > MEAS_AT_FOV_TOF2) {return -1;}
+
+        if(meas > MEAS_AT_145_MM_TOF2) {
+            return linearise_measure(MEAS_AT_145_MM_TOF2, 145, MEAS_AT_FOV_TOF2, REAL_DISTANCE_AT_FOV2, meas);
+        
+        }else if(meas > MEAS_AT_072_MM_TOF2) {
+            if(fov2_greater_than_145_mm){
+                return linearise_measure(MEAS_AT_072_MM_TOF2, 72, MEAS_AT_145_MM_TOF2, 145, meas);
+            }else{
+                return linearise_measure(MEAS_AT_072_MM_TOF2, 72, MEAS_AT_FOV_TOF2, REAL_DISTANCE_AT_FOV2, meas);
+            }
+        
+        }else if(meas > MEAS_AT_000_MM_TOF2) {
+            if(fov2_greater_than_072_mm){
+                return linearise_measure(MEAS_AT_000_MM_TOF2, 0, MEAS_AT_072_MM_TOF2, 72, meas);
+            }else{
+                return linearise_measure(MEAS_AT_000_MM_TOF2, 0, MEAS_AT_FOV_TOF2, REAL_DISTANCE_AT_FOV2, meas);
+            }
+        }else if(meas > 0){
+            return 0;
+
+        }else {
+            return -1;
+        }
+    }
+    else{
+        return -1;
+    }
+
+}
+
+void set_tof_calibration(int tof_number, int fov, int real_distance_at_fov, 
+                    int meas_at_000_mm, int meas_at_072_mm, int meas_at_145_mm){
+    
+    
+    if((meas_at_000_mm <= meas_at_072_mm) && (meas_at_072_mm <= meas_at_145_mm)){
+        if(tof_number == TOF1){
+            tof1_calibrated = true;
+        }
+        else if(tof_number == TOF2){
+            tof2_calibrated = true;
+        }
+    }
+    else{
+        if(tof_number == TOF1){
+            tof1_calibrated = false;
+        }
+        else if(tof_number == TOF2){
+            tof2_calibrated = false;
+        }
+    }
+
+    if(tof_number == TOF1){
+        MEAS_AT_FOV_TOF1 = fov;
+        REAL_DISTANCE_AT_FOV1 = real_distance_at_fov;
+        MEAS_AT_000_MM_TOF1   = meas_at_000_mm;
+        MEAS_AT_072_MM_TOF1   = meas_at_072_mm;
+        MEAS_AT_145_MM_TOF1   = meas_at_145_mm;
+
+        fov1_greater_than_145_mm = (real_distance_at_fov > 145);
+        fov1_greater_than_072_mm = (real_distance_at_fov > 72);
+        fov1_greater_than_000_mm = (real_distance_at_fov > 0);
+
     }
     else if(tof_number == TOF2){
-        FOV2 = fov;
-        MEAS_AT_000_MM_TOF2 = meas_at_000_mm;
-        MEAS_AT_072_MM_TOF2 = meas_at_072_mm;
-        MEAS_AT_145_MM_TOF2 = meas_at_145_mm;
+        MEAS_AT_FOV_TOF2 = fov;
+        REAL_DISTANCE_AT_FOV2 = real_distance_at_fov;
+        MEAS_AT_000_MM_TOF2   = meas_at_000_mm;
+        MEAS_AT_072_MM_TOF2   = meas_at_072_mm;
+        MEAS_AT_145_MM_TOF2   = meas_at_145_mm;
+
+        fov2_greater_than_145_mm = (real_distance_at_fov > 145);
+        fov2_greater_than_072_mm = (real_distance_at_fov > 72);
+        fov2_greater_than_000_mm = (real_distance_at_fov > 0);
     }
 }
 
-bool calibration(int mode){
 
-
-}
 
 void update_tof_distances(){
     int staff_d1  = get_mes_tof_1();
@@ -214,52 +321,57 @@ bool compute_ball_position(){
     bool position_valid = false;
 
     if(d1_valid && d2_valid){
-        d1_corr = d1 + tof1_offset_mm;
-        d2_corr = d2 + tof2_offset_mm;
+        //d1_corr = d1 + tof1_offset_mm;
+        //d2_corr = d2 + tof2_offset_mm;
+        d1_corr = linearise_tof_measure(TOF1, d1);
+        d2_corr = linearise_tof_measure(TOF2, d2);
 
-        if(d1_corr > MAX_VALUE_TOF1_MM){
-            if(d2_corr > MAX_VALUE_TOF2_MM){
+        if((d1_corr >= 0)&&(d2_corr >= 0)){
+            if((d1_corr < MIN_ACCEPTABLE_TOF_VALUE_MM) && (d2_corr < MIN_ACCEPTABLE_TOF_VALUE_MM)){
                 ball_position_mm = -1;
-            }
-            else{
-                ball_position_mm = d2_corr;
+            
+            } else{
                 position_valid = true;
-            }
-        }else{
-            if(d1_corr < MIN_ACCEPTABLE_TOF_VALUE_MM && d2_corr < MIN_ACCEPTABLE_TOF_VALUE_MM){
-                ball_position_mm = -1;
-            }
-            else if((d1_corr < MIN_VALUE_TOF1_MM)||(d2_corr > MAX_VALUE_TOF2_MM)){
-                ball_position_mm = TABLE_LENGTH_MM - d1_corr;
-                position_valid = true;
-
-            }else{
                 ball_position_mm = (TABLE_LENGTH_MM - d1_corr + d2_corr) / 2;
-                position_valid = true;
             }
-        }
-    }else if(d1_valid){
 
-        d1_corr = d1 + tof1_offset_mm;
-
-        if(d1_corr > MAX_VALUE_TOF1_MM){
-            ball_position_mm = -1;
-        }
-        else{
+        }else if((d1_corr >= 0)&&(d2_corr < 0)){
             ball_position_mm = TABLE_LENGTH_MM - d1_corr;
             position_valid = true;
+
+        }else if((d1_corr < 0)&&(d2_corr >= 0)){
+            ball_position_mm = d2_corr;
+            position_valid = true;
+
+        }else{
+            ball_position_mm = -1;
+        }
+
+    }else if(d1_valid){
+
+        //d1_corr = d1 + tof1_offset_mm;
+        d1_corr = linearise_tof_measure(TOF1, d1);
+
+        if(d1_corr >= 0){
+            ball_position_mm = TABLE_LENGTH_MM - d1_corr;
+            position_valid = true;
+            
+        }else{
+            ball_position_mm = -1;
+            
         }
     }else if(d2_valid){
 
-        d2_corr = d2 + tof2_offset_mm;
+        //d2_corr = d2 + tof2_offset_mm;
+        d2_corr = linearise_tof_measure(TOF2, d2);
 
-        if(d2_corr > MAX_VALUE_TOF2_MM){
-            ball_position_mm = -1;
-        }
-        else{
+        if(d2_corr >= 0){
             ball_position_mm = d2_corr;
             position_valid = true;
+        }else{
+            ball_position_mm = -1;
         }
+
     }else{
         ball_position_mm = -1;
     }
