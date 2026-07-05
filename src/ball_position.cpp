@@ -20,6 +20,21 @@ static const int MIN_ACCEPTABLE_TOF_VALUE_MM = 80; //If both tofs give values be
 static int tof1_offset_mm = -15;
 static int tof2_offset_mm = 0;
 
+// ------- BETTER TOF CALIBRATION -------
+
+static int FOV1 = 0;
+static int FOV2 = 0;
+
+static int MEAS_AT_000_MM_TOF1 = 0;
+static int MEAS_AT_072_MM_TOF1 = 0;
+static int MEAS_AT_145_MM_TOF1 = 0;
+
+static int MEAS_AT_000_MM_TOF2 = 0;
+static int MEAS_AT_072_MM_TOF2 = 0;
+static int MEAS_AT_145_MM_TOF2 = 0;
+
+
+
 
 
 // ------ MOVING AVERAGES ------
@@ -61,6 +76,33 @@ static bool d2_valid = false;
 static bool speed_valid = false;
 
 //////////////////////////////////////
+
+int linearise_measure(int min_meas, int min_val, int max_meas, int max_val, int meas){
+    float slope = (float)(max_val - min_val) / (float)(max_meas - min_meas);
+    float intercept = (float)min_val - slope * (float)min_meas;
+
+    return (int)lroundf(slope * (float)meas + intercept);
+}
+
+void set_tof_calibration(int tof_number, int fov, int meas_at_000_mm, int meas_at_072_mm, int meas_at_145_mm){
+    if(tof_number == TOF1){
+        FOV1 = fov;
+        MEAS_AT_000_MM_TOF1 = meas_at_000_mm;
+        MEAS_AT_072_MM_TOF1 = meas_at_072_mm;
+        MEAS_AT_145_MM_TOF1 = meas_at_145_mm;
+    }
+    else if(tof_number == TOF2){
+        FOV2 = fov;
+        MEAS_AT_000_MM_TOF2 = meas_at_000_mm;
+        MEAS_AT_072_MM_TOF2 = meas_at_072_mm;
+        MEAS_AT_145_MM_TOF2 = meas_at_145_mm;
+    }
+}
+
+bool calibration(int mode){
+
+
+}
 
 void update_tof_distances(){
     int staff_d1  = get_mes_tof_1();

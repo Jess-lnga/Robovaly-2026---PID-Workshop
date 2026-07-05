@@ -7,6 +7,10 @@ github: jess-lnga
 
 #ifndef BALL_POS_H
 #define BALL_POS_H
+
+#define TOF1 1
+#define TOF2 2
+
 void update_tof_distances();
 bool compute_ball_position();
 bool compute_ball_speed();
@@ -18,6 +22,8 @@ int get_ball_speed();
 bool is_ball_speed_valid();
 
 void display_distances();
+
+bool calibration(int mode, int value);
 
 
 #endif // BALL_POS_H
