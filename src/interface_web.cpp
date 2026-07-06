@@ -18,7 +18,10 @@ static const uint32_t WEB_TASK_DELAY_MS = 1;
 static const char *CALIBRATION_NAMESPACE = "tof_cal";
 static const char *CALIBRATION_DONE_KEY = "done";
 static const char *CALIBRATION_VERSION_KEY = "version";
-static const uint32_t CALIBRATION_SCHEMA_VERSION = 2;
+static const uint32_t CALIBRATION_SCHEMA_VERSION = 3;
+static const char *CONTROLLER_NAMESPACE = "ctrl";
+static const char *CONTROLLER_VERSION_KEY = "version";
+static const uint32_t CONTROLLER_SCHEMA_VERSION = 1;
 
 static WebServer server(80);
 static TaskHandle_t web_task_handle = nullptr;
@@ -39,6 +42,12 @@ enum CalibrationStep {
   CAL_ERROR,
 };
 
+enum CalibrationMode {
+  CAL_MODE_INITIAL_BOTH,
+  CAL_MODE_MANUAL_TOF1,
+  CAL_MODE_MANUAL_TOF2,
+};
+
 struct TofCalibrationDraft {
   int meas_fov = INFINITE_TOF_VALUE;
   int real_fov = 145;
@@ -50,6 +59,8 @@ struct TofCalibrationDraft {
 static TofCalibrationDraft calibration_tof1;
 static TofCalibrationDraft calibration_tof2;
 static CalibrationStep calibration_step = CAL_TOF1_FIND_FOV;
+static CalibrationMode calibration_mode = CAL_MODE_INITIAL_BOTH;
+static bool calibration_flow_done = false;
 static String calibration_error_msg = "";
 
 static const char INDEX_HTML[] PROGMEM = R"rawliteral(
@@ -65,11 +76,15 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 .app{width:min(1180px,100vw);margin:0 auto;padding:10px;display:grid;gap:10px}
 .panel{background:var(--panel);border:3px solid var(--line);border-radius:4px;padding:10px}
 .sceneWrap{height:42vh;min-height:280px;position:relative}.sceneWrap canvas{width:100%;height:100%;display:block}
-.topBtn{position:absolute;top:10px;left:10px;width:52px;height:44px;border:3px solid var(--line);background:#f8f5ea;font-weight:900;font-size:24px}
+.topBtn,.gearBtn{position:absolute;top:10px;width:52px;height:44px;border:3px solid var(--line);background:#f8f5ea;font-weight:900;font-size:24px}
+.topBtn{left:10px}.gearBtn{right:10px}
+.settingsMenu{position:absolute;top:62px;right:10px;display:none;min-width:190px;background:#fffdf6;border:3px solid var(--line);padding:8px;z-index:5}
+.settingsMenu.open{display:grid;gap:8px}.menuBtn{border:3px solid var(--line);background:#f8f5ea;font-weight:800;font-size:16px;padding:9px 10px;text-align:left}
 .sectionTitle{text-align:center;font-size:25px;font-weight:800;margin:0 0 8px}
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.plotBox{height:300px;position:relative}.plotBox canvas{width:100%;height:100%}
 .plotLabel{position:absolute;top:8px;right:50px;font-weight:800;text-decoration:underline}.plotBtn{position:absolute;top:8px;right:8px;width:34px;height:30px;border:3px solid var(--line);background:#f8f5ea;font-weight:900}
 .controls{display:grid;grid-template-columns:1fr 1fr;gap:10px}.formGrid{display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:center}
+.saveRow{display:flex;justify-content:flex-end;margin-top:10px}.saveBtn{border:3px solid var(--line);background:#f8f5ea;font-weight:900;font-size:16px;padding:8px 12px}
 label{font-weight:800}.field{height:38px;border:3px solid var(--line);background:white;font-size:18px;padding:3px 8px;width:100%}
 .stabHeader{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:24px;font-weight:800}.toggle{width:46px;height:38px;border:3px solid var(--line);background:#f8f5ea;font-size:24px;font-weight:900}
 .manualTitle{text-align:center;font-size:22px;font-weight:800;text-decoration:underline;margin:8px 0}.sliderRow{display:grid;grid-template-columns:34px 1fr 46px;gap:10px;align-items:center}
@@ -82,6 +97,10 @@ button{cursor:pointer}button:disabled,input:disabled{opacity:.5;cursor:not-allow
 <div class="app">
   <div class="panel sceneWrap">
     <button class="topBtn" id="scenePause">||</button>
+    <button class="gearBtn" id="settingsBtn">&#9881;</button>
+    <div class="settingsMenu" id="settingsMenu">
+      <button class="menuBtn" id="calibrateBtn">Calibrate TOFs</button>
+    </div>
     <canvas id="scene"></canvas>
   </div>
 
@@ -103,6 +122,8 @@ button{cursor:pointer}button:disabled,input:disabled{opacity:.5;cursor:not-allow
         <label for="kiInput">Ki</label><input class="field" id="kiInput" type="number" step="0.001">
         <label for="kdInput">Kd</label><input class="field" id="kdInput" type="number" step="0.001">
       </div>
+      <div class="saveRow"><button class="saveBtn" id="saveValuesBtn">Save values</button></div>
+      <div class="small" id="saveStatus">Values are saved only when requested.</div>
     </div>
     <div class="panel">
       <div class="stabHeader"><span>Stabilization</span><button class="toggle" id="stabToggle">▶</button></div>
@@ -122,9 +143,11 @@ button{cursor:pointer}button:disabled,input:disabled{opacity:.5;cursor:not-allow
 const TABLE_LEN_MM=290, REFRESH_MS=55, MAX_PLOT_S=30;
 const scene=document.getElementById('scene'), anglePlot=document.getElementById('anglePlot'), posPlot=document.getElementById('posPlot'), speedPlot=document.getElementById('speedPlot');
 const scenePause=document.getElementById('scenePause'), plotToggle=document.getElementById('plotToggle'), plotInfo=document.getElementById('plotInfo');
+const settingsBtn=document.getElementById('settingsBtn'), settingsMenu=document.getElementById('settingsMenu'), calibrateBtn=document.getElementById('calibrateBtn');
 const anglePause=document.getElementById('anglePause'), posPause=document.getElementById('posPause'), speedPause=document.getElementById('speedPause');
 const stabToggle=document.getElementById('stabToggle'), manualSlider=document.getElementById('manualSlider');
 const refInput=document.getElementById('refInput'), kpInput=document.getElementById('kpInput'), kiInput=document.getElementById('kiInput'), kdInput=document.getElementById('kdInput');
+const saveValuesBtn=document.getElementById('saveValuesBtn'), saveStatus=document.getElementById('saveStatus');
 const servoTxt=document.getElementById('servoTxt'), tableTxt=document.getElementById('tableTxt'), xTxt=document.getElementById('xTxt'), vTxt=document.getElementById('vTxt'), d1Txt=document.getElementById('d1Txt'), d2Txt=document.getElementById('d2Txt');
 let state={x:-1,v:0,speed_valid:false,servo_angle:90,stabilization:true,kp:0,ki:0,kd:0,ref:150,d1:-1,d2:-1};
 let sceneFrozen=false, plotRunning=false, angleFrozen=false, posFrozen=false, speedFrozen=false, plotStart=0, angleData=[], posData=[], speedData=[], lastStab=true, editing=false;
@@ -213,8 +236,76 @@ stabToggle.onclick=async()=>{const en=state.stabilization?0:1;await fetch(`/api/
 manualSlider.oninput=()=>{servoTxt.textContent=manualSlider.value;tableTxt.textContent=(Number(manualSlider.value)/2).toFixed(1)};
 manualSlider.onchange=()=>{fetch(`/api/control?angle=${manualSlider.value}`,{cache:'no-store'}).then(fetchState)};
 [refInput,kpInput,kiInput,kdInput].forEach(el=>{el.onfocus=()=>editing=true;el.onblur=()=>editing=false;el.onchange=()=>{const q=`ref=${refInput.value}&kp=${kpInput.value}&ki=${kiInput.value}&kd=${kdInput.value}`;fetch(`/api/params?${q}`,{cache:'no-store'}).then(fetchState)}});
+settingsBtn.onclick=()=>settingsMenu.classList.toggle('open');
+calibrateBtn.onclick=()=>{location.href='/calibration_select'};
+saveValuesBtn.onclick=async()=>{
+  const q=`ref=${refInput.value}&kp=${kpInput.value}&ki=${kiInput.value}&kd=${kdInput.value}`;
+  saveValuesBtn.disabled=true;saveStatus.textContent='Saving...';
+  try{await fetch(`/api/params/save?${q}`,{cache:'no-store'});saveStatus.textContent='Saved.';fetchState()}catch(e){saveStatus.textContent='Save failed.'}
+  saveValuesBtn.disabled=false;
+};
 window.onresize=drawAll;setInterval(fetchState,REFRESH_MS);fetchState();
 </script>
+</body>
+</html>
+)rawliteral";
+
+static const char WELCOME_HTML[] PROGMEM = R"rawliteral(
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PID Table Workshop</title>
+<style>
+body{margin:0;min-height:100vh;background:#f4f1e8;color:#171717;font-family:Arial,Helvetica,sans-serif;display:grid;place-items:center;padding:18px}
+.panel{width:min(760px,100%);background:#fffdf6;border:3px solid #202020;border-radius:4px;padding:28px;text-align:center}
+h1{font-size:30px;line-height:1.2;margin:0 0 18px}.msg{font-size:20px;line-height:1.45;margin:0 0 24px}
+button{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:26px;font-weight:900;padding:12px 34px;cursor:pointer}
+</style>
+</head>
+<body>
+<section class="panel">
+<h1>Merci d'avoir participe au Workshop PID-TABLE de ROBOVALY.</h1>
+<p class="msg">Pour continuer, veuillez callibrer les capteurs de distance du systeme.</p>
+<button id="startBtn">START</button>
+</section>
+<script>
+document.getElementById('startBtn').onclick=async()=>{
+  await fetch('/api/calibration/action?cmd=start&mode=initial',{cache:'no-store'});
+  location.href='/calibration?initial=1';
+};
+</script>
+</body>
+</html>
+)rawliteral";
+
+static const char CALIBRATION_SELECT_HTML[] PROGMEM = R"rawliteral(
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Calibration TOF</title>
+<style>
+body{margin:0;min-height:100vh;background:#f4f1e8;color:#171717;font-family:Arial,Helvetica,sans-serif;display:grid;place-items:center;padding:18px}
+.panel{width:min(680px,100%);background:#fffdf6;border:3px solid #202020;border-radius:4px;padding:24px}
+h1{font-size:28px;margin:0 0 12px}.msg{font-size:18px;line-height:1.4;color:#555;margin:0 0 22px}.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:22px;font-weight:900;padding:14px 16px;cursor:pointer;text-align:center;text-decoration:none}
+.back{display:block;margin-top:14px;font-size:18px}
+@media(max-width:560px){.row{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<section class="panel">
+<h1>Calibration des TOFs</h1>
+<p class="msg">Choisissez le capteur a recalibrer. Les anciens parametres restent utilises tant que la nouvelle calibration n'est pas validee.</p>
+<div class="row">
+<button onclick="location.href='/calibration?manual=1&target=1'">Calibrate TOF 1</button>
+<button onclick="location.href='/calibration?manual=1&target=2'">Calibrate TOF 2</button>
+</div>
+<a class="back" href="/">Retour</a>
+</section>
 </body>
 </html>
 )rawliteral";
@@ -237,21 +328,18 @@ input{height:42px;border:3px solid #202020;background:white;font-size:20px;paddi
 </head>
 <body>
 <div class="app">
-<section class="panel">
-<h1>Merci d'avoir participe au Workshop PID-TABLE de ROBOVALY.</h1>
-<p class="msg">Pour continuer, veuillez callibrer les capteurs de distance du systeme.</p>
-<div class="row"><span class="dot" id="dot"></span><b id="rawTxt">--</b><span id="tofTxt">--</span></div>
-</section>
 <section class="panel scene"><canvas id="calScene"></canvas></section>
 <section class="panel">
 <h1 id="title">Calibration</h1>
 <p class="msg" id="instruction">Chargement...</p>
+<div class="row"><span class="dot" id="dot"></span><b id="rawTxt">--</b><span id="tofTxt">--</span></div>
 <div class="row" id="realRow"><label for="realInput"><b>Distance reelle au FOV max</b></label><input id="realInput" type="number" min="1" max="400" step="1"><span>mm</span></div>
 <div class="row">
 <button id="doneBtn">Done</button>
 <button id="submitBtn">Valider distance</button>
 <button id="acceptBtn">Valider calibration</button>
 <button id="restartBtn">Restart</button>
+<button id="cancelBtn">Cancel</button>
 </div>
 <div class="hint" id="status">Les valeurs sont sauvegardees apres validation finale.</div>
 </section>
@@ -261,8 +349,10 @@ const TABLE_LEN_MM=290, REFRESH_MS=80;
 const scene=document.getElementById('calScene'),dot=document.getElementById('dot'),rawTxt=document.getElementById('rawTxt'),tofTxt=document.getElementById('tofTxt');
 const title=document.getElementById('title'),instruction=document.getElementById('instruction'),statusEl=document.getElementById('status');
 const realRow=document.getElementById('realRow'),realInput=document.getElementById('realInput');
-const doneBtn=document.getElementById('doneBtn'),submitBtn=document.getElementById('submitBtn'),acceptBtn=document.getElementById('acceptBtn'),restartBtn=document.getElementById('restartBtn');
+const doneBtn=document.getElementById('doneBtn'),submitBtn=document.getElementById('submitBtn'),acceptBtn=document.getElementById('acceptBtn'),restartBtn=document.getElementById('restartBtn'),cancelBtn=document.getElementById('cancelBtn');
 let s={};
+const params=new URLSearchParams(location.search);
+let startupDone=false;
 function fit(c){const r=c.getBoundingClientRect(),d=window.devicePixelRatio||1;const w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));if(c.width!==w||c.height!==h){c.width=w;c.height=h}}
 function drawScene(){
 fit(scene);const c=scene.getContext('2d'),w=scene.width,h=scene.height;c.clearRect(0,0,w,h);c.lineWidth=4;c.strokeStyle='#171717';c.fillStyle='#171717';
@@ -280,6 +370,7 @@ submitBtn.classList.toggle('hidden',!s.needs_real_input);
 realRow.classList.toggle('hidden',!s.needs_real_input);
 acceptBtn.classList.toggle('hidden',s.step!=='verify');
 restartBtn.classList.toggle('hidden',false);
+cancelBtn.classList.toggle('hidden',params.get('initial')==='1');
 if(s.needs_real_input && !realInput.value)realInput.value=s.real_fov||145;
 }
 function update(){
@@ -291,12 +382,20 @@ dot.className='dot '+(s.raw_valid?'ok':'bad');
 if(s.error)statusEl.innerHTML=`<span class="err">${s.error}</span>`;else statusEl.textContent=s.status||'';
 setButtons();drawScene();
 }
-async function getState(){try{const r=await fetch('/api/calibration/state',{cache:'no-store'});s=await r.json();update()}catch(e){statusEl.textContent='Erreur reseau'}}
-async function action(q){doneBtn.disabled=submitBtn.disabled=acceptBtn.disabled=restartBtn.disabled=true;try{const r=await fetch('/api/calibration/action?'+q,{cache:'no-store'});s=await r.json();update();if(s.done)setTimeout(()=>location.reload(),600)}catch(e){statusEl.textContent='Erreur action'}doneBtn.disabled=submitBtn.disabled=acceptBtn.disabled=restartBtn.disabled=false}
+async function ensureStarted(){
+if(startupDone)return;
+startupDone=true;
+if(params.get('initial')==='1')await fetch('/api/calibration/action?cmd=start&mode=initial',{cache:'no-store'});
+else if(params.get('target')==='1')await fetch('/api/calibration/action?cmd=start&target=1',{cache:'no-store'});
+else if(params.get('target')==='2')await fetch('/api/calibration/action?cmd=start&target=2',{cache:'no-store'});
+}
+async function getState(){try{await ensureStarted();const r=await fetch('/api/calibration/state',{cache:'no-store'});s=await r.json();update()}catch(e){statusEl.textContent='Erreur reseau'}}
+async function action(q){doneBtn.disabled=submitBtn.disabled=acceptBtn.disabled=restartBtn.disabled=cancelBtn.disabled=true;try{const r=await fetch('/api/calibration/action?'+q,{cache:'no-store'});s=await r.json();update();if(s.done)setTimeout(()=>{location.href='/'},600)}catch(e){statusEl.textContent='Erreur action'}doneBtn.disabled=submitBtn.disabled=acceptBtn.disabled=restartBtn.disabled=cancelBtn.disabled=false}
 doneBtn.onclick=()=>action('cmd=done');
 submitBtn.onclick=()=>action('cmd=real_fov&value='+encodeURIComponent(realInput.value||'145'));
 acceptBtn.onclick=()=>action('cmd=accept');
 restartBtn.onclick=()=>action('cmd=restart');
+cancelBtn.onclick=()=>action('cmd=cancel');
 window.onresize=drawScene;setInterval(getState,REFRESH_MS);getState();
 </script>
 </body>
@@ -392,8 +491,9 @@ static void reset_calibration_drafts(void) {
   calibration_tof1 = TofCalibrationDraft();
   calibration_tof2 = TofCalibrationDraft();
   calibration_step = CAL_TOF1_FIND_FOV;
+  calibration_mode = CAL_MODE_INITIAL_BOTH;
+  calibration_flow_done = false;
   calibration_error_msg = "";
-  distance_sensors_calibrated = false;
 }
 
 static void save_draft_to_preferences(void) {
@@ -450,6 +550,67 @@ static void save_calibration_done(bool done) {
   prefs.end();
 }
 
+static void start_initial_calibration(void) {
+  reset_calibration_drafts();
+  calibration_mode = CAL_MODE_INITIAL_BOTH;
+  calibration_step = CAL_TOF1_FIND_FOV;
+  calibration_flow_done = false;
+  distance_sensors_calibrated = false;
+  save_calibration_done(false);
+}
+
+static void start_manual_calibration(int tof_number) {
+  calibration_error_msg = "";
+  calibration_flow_done = false;
+
+  if (!load_draft_from_preferences()) {
+    reset_calibration_drafts();
+    calibration_error_msg = "Aucune calibration sauvegardee. Faites la calibration initiale complete.";
+    distance_sensors_calibrated = false;
+    return;
+  }
+
+  apply_draft_calibration(TOF1);
+  apply_draft_calibration(TOF2);
+  distance_sensors_calibrated = true;
+
+  if (tof_number == TOF1) {
+    calibration_tof1 = TofCalibrationDraft();
+    calibration_mode = CAL_MODE_MANUAL_TOF1;
+    calibration_step = CAL_TOF1_FIND_FOV;
+  } else {
+    calibration_tof2 = TofCalibrationDraft();
+    calibration_mode = CAL_MODE_MANUAL_TOF2;
+    calibration_step = CAL_TOF2_FIND_FOV;
+  }
+}
+
+static void restore_saved_calibration(void) {
+  calibration_error_msg = "";
+  calibration_flow_done = true;
+
+  if (load_draft_from_preferences()) {
+    apply_draft_calibration(TOF1);
+    apply_draft_calibration(TOF2);
+    distance_sensors_calibrated = true;
+  } else {
+    reset_calibration_drafts();
+    distance_sensors_calibrated = false;
+  }
+}
+
+static int manual_calibration_target(void) {
+  if (calibration_mode == CAL_MODE_MANUAL_TOF1) {
+    return TOF1;
+  }
+
+  if (calibration_mode == CAL_MODE_MANUAL_TOF2) {
+    return TOF2;
+  }
+
+  return 0;
+}
+
 static bool should_calibrate_target(const TofCalibrationDraft &draft, int target_mm) {
   return draft.real_fov > target_mm;
 }
@@ -480,11 +641,70 @@ static CalibrationStep next_step_after_target(int tof_number, int completed_targ
   }
 
   if (apply_draft_calibration(tof_number)) {
-    return (tof_number == TOF1) ? CAL_TOF2_FIND_FOV : CAL_VERIFY;
+    if (calibration_mode == CAL_MODE_INITIAL_BOTH && tof_number == TOF1) {
+      return CAL_TOF2_FIND_FOV;
+    }
+
+    return CAL_VERIFY;
   }
 
   calibration_error_msg = (tof_number == TOF1) ? "Calibration TOF 1 invalide." : "Calibration TOF 2 invalide.";
   return CAL_ERROR;
+}
+
+static void load_controller_settings(void) {
+  Preferences prefs;
+  prefs.begin(CONTROLLER_NAMESPACE, true);
+  uint32_t version = prefs.getUInt(CONTROLLER_VERSION_KEY, 0);
+
+  if (version == CONTROLLER_SCHEMA_VERSION) {
+    float current_kp;
+    float current_ki;
+    float current_kd;
+    get_controller_gains(&current_kp, &current_ki, &current_kd);
+
+    int reference_mm = prefs.getInt("ref", get_controller_reference_mm());
+    float kp = prefs.getFloat("kp", current_kp);
+    float ki = prefs.getFloat("ki", current_ki);
+    float kd = prefs.getFloat("kd", current_kd);
+
+    set_controller_reference_mm(reference_mm);
+    set_controller_gains(kp, ki, kd);
+  }
+
+  prefs.end();
+}
+
+static void save_controller_settings(void) {
+  float kp;
+  float ki;
+  float kd;
+  get_controller_gains(&kp, &ki, &kd);
+
+  Preferences prefs;
+  prefs.begin(CONTROLLER_NAMESPACE, false);
+  prefs.putUInt(CONTROLLER_VERSION_KEY, CONTROLLER_SCHEMA_VERSION);
+  prefs.putInt("ref", get_controller_reference_mm());
+  prefs.putFloat("kp", kp);
+  prefs.putFloat("ki", ki);
+  prefs.putFloat("kd", kd);
+  prefs.end();
+}
+
+static void update_controller_params_from_request(void) {
+  float kp;
+  float ki;
+  float kd;
+  get_controller_gains(&kp, &ki, &kd);
+
+  if (server.hasArg("ref")) {
+    set_controller_reference_mm(server.arg("ref").toInt());
+  }
+
+  if (server.hasArg("kp")) kp = server.arg("kp").toFloat();
+  if (server.hasArg("ki")) ki = server.arg("ki").toFloat();
+  if (server.hasArg("kd")) kd = server.arg("kd").toFloat();
+  set_controller_gains(kp, ki, kd);
 }
 
 static void send_state(void) {
@@ -615,7 +835,7 @@ static void send_calibration_state(void) {
   json += "\"real_fov\":" + String(real_fov) + ",";
   json += "\"status\":\"Calibration non finalisee\",";
   json += "\"error\":\"" + calibration_error_msg + "\",";
-  json += "\"done\":" + String(distance_sensors_calibrated ? "true" : "false");
+  json += "\"done\":" + String(calibration_flow_done ? "true" : "false");
   json += "}";
 
   server.send(200, "application/json; charset=utf-8", json);
@@ -625,9 +845,36 @@ static void handle_calibration_action(void) {
   String cmd = server.arg("cmd");
   calibration_error_msg = "";
 
+  if (cmd == "start") {
+    if (server.arg("mode") == "initial") {
+      start_initial_calibration();
+    } else if (server.arg("target").toInt() == TOF1) {
+      start_manual_calibration(TOF1);
+    } else if (server.arg("target").toInt() == TOF2) {
+      start_manual_calibration(TOF2);
+    } else {
+      calibration_error_msg = "Demarrage de calibration invalide.";
+    }
+
+    send_calibration_state();
+    return;
+  }
+
+  if (cmd == "cancel") {
+    restore_saved_calibration();
+    send_calibration_state();
+    return;
+  }
+
   if (cmd == "restart") {
-    reset_calibration_drafts();
-    save_calibration_done(false);
+    int manual_target = manual_calibration_target();
+
+    if (calibration_mode == CAL_MODE_INITIAL_BOTH || manual_target == 0) {
+      start_initial_calibration();
+    } else {
+      start_manual_calibration(manual_target);
+    }
+
     send_calibration_state();
     return;
   }
@@ -635,6 +882,7 @@ static void handle_calibration_action(void) {
   if (cmd == "accept" && calibration_step == CAL_VERIFY) {
     save_draft_to_preferences();
     distance_sensors_calibrated = true;
+    calibration_flow_done = true;
     send_calibration_state();
     return;
   }
@@ -710,12 +958,20 @@ static void setup_routes(void) {
     if (distance_sensors_calibrated) {
       server.send_P(200, "text/html; charset=utf-8", INDEX_HTML);
     } else {
-      server.send_P(200, "text/html; charset=utf-8", CALIBRATION_HTML);
+      server.send_P(200, "text/html; charset=utf-8", WELCOME_HTML);
     }
   });
 
   server.on("/calibration", HTTP_GET, []() {
     server.send_P(200, "text/html; charset=utf-8", CALIBRATION_HTML);
+  });
+
+  server.on("/calibration_select", HTTP_GET, []() {
+    if (distance_sensors_calibrated) {
+      server.send_P(200, "text/html; charset=utf-8", CALIBRATION_SELECT_HTML);
+    } else {
+      server.send_P(200, "text/html; charset=utf-8", WELCOME_HTML);
+    }
   });
 
   server.on("/api/calibrate", HTTP_GET, []() {
@@ -761,20 +1017,19 @@ static void setup_routes(void) {
       return;
     }
 
-    float kp;
-    float ki;
-    float kd;
-    get_controller_gains(&kp, &ki, &kd);
+    update_controller_params_from_request();
 
-    if (server.hasArg("ref")) {
-      set_controller_reference_mm(server.arg("ref").toInt());
+    send_state();
+  });
+
+  server.on("/api/params/save", HTTP_GET, []() {
+    if (!distance_sensors_calibrated) {
+      server.send(423, "application/json; charset=utf-8", "{\"calibrated\":false}");
+      return;
     }
 
-    if (server.hasArg("kp")) kp = server.arg("kp").toFloat();
-    if (server.hasArg("ki")) ki = server.arg("ki").toFloat();
-    if (server.hasArg("kd")) kd = server.arg("kd").toFloat();
-    set_controller_gains(kp, ki, kd);
-
+    update_controller_params_from_request();
+    save_controller_settings();
     send_state();
   });
 
@@ -791,6 +1046,7 @@ static void web_task(void *pv) {
     apply_draft_calibration(TOF1);
     apply_draft_calibration(TOF2);
   }
+  load_controller_settings();
 
   WiFi.mode(WIFI_AP);
   bool ap_ok = WiFi.softAP(AP_SSID, AP_PASS);
