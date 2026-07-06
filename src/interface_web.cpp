@@ -88,9 +88,9 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.plotBox{height:300px;position:relative}.plotBox canvas{width:100%;height:100%}
 .plotLabel{position:absolute;top:8px;right:50px;font-weight:800;text-decoration:underline}.plotBtn{position:absolute;top:8px;right:8px;width:34px;height:30px;border:3px solid var(--line);background:#f8f5ea;font-weight:900}
 .controls{display:grid;grid-template-columns:1fr 1fr;gap:10px}.formGrid{display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:center}
-.saveRow{display:flex;justify-content:flex-end;margin-top:10px}.saveBtn{border:3px solid var(--line);background:#f8f5ea;font-weight:900;font-size:16px;padding:8px 12px}
+.saveRow{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}.saveBtn{border:3px solid var(--line);background:#f8f5ea;font-weight:900;font-size:16px;padding:8px 12px}
 label{font-weight:800}.field{height:38px;border:3px solid var(--line);background:white;font-size:18px;padding:3px 8px;width:100%}
-.stabHeader{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:24px;font-weight:800}.toggle{width:46px;height:38px;border:3px solid var(--line);background:#f8f5ea;font-size:24px;font-weight:900}
+.stabHeader{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:24px;font-weight:800}.toggle{min-width:46px;height:38px;border:3px solid var(--line);background:#f8f5ea;font-size:24px;font-weight:900;padding:0 10px}
 .manualTitle{text-align:center;font-size:22px;font-weight:800;text-decoration:underline;margin:8px 0}.sliderRow{display:grid;grid-template-columns:34px 1fr 46px;gap:10px;align-items:center}
 input[type=range]{width:100%;accent-color:#111}.small{font-size:13px;color:var(--muted);margin-top:8px}.status{display:flex;gap:16px;flex-wrap:wrap;font-size:14px;color:var(--muted)}
 button{cursor:pointer}button:disabled,input:disabled{opacity:.5;cursor:not-allowed}
@@ -126,13 +126,14 @@ button{cursor:pointer}button:disabled,input:disabled{opacity:.5;cursor:not-allow
         <label for="kiInput">Ki</label><input class="field" id="kiInput" type="number" step="0.001">
         <label for="kdInput">Kd</label><input class="field" id="kdInput" type="number" step="0.001">
       </div>
-      <div class="saveRow"><button class="saveBtn" id="saveValuesBtn">Save values</button></div>
+      <div class="saveRow"><button class="saveBtn" id="resetValuesBtn">Reset</button><button class="saveBtn" id="saveValuesBtn">Save values</button></div>
       <div class="small" id="saveStatus">Values are saved only when requested.</div>
     </div>
     <div class="panel">
       <div class="stabHeader"><span>Stabilization</span><button class="toggle" id="stabToggle">▶</button></div>
       <div class="manualTitle">Manual Ctrl</div>
       <div class="sliderRow"><span>0</span><input id="manualSlider" type="range" min="0" max="180" step="1"><span>180</span></div>
+      <div class="saveRow"><button class="saveBtn" id="neutralBtn">Neutral pos</button></div>
       <div class="small">Servo: <b id="servoTxt">--</b> deg | table display angle: <b id="tableTxt">--</b> deg</div>
       <div class="status">
         <span>x=<b id="xTxt">--</b> mm</span>
@@ -151,10 +152,10 @@ const settingsBtn=document.getElementById('settingsBtn'), settingsMenu=document.
 const anglePause=document.getElementById('anglePause'), posPause=document.getElementById('posPause'), speedPause=document.getElementById('speedPause');
 const stabToggle=document.getElementById('stabToggle'), manualSlider=document.getElementById('manualSlider');
 const refInput=document.getElementById('refInput'), kpInput=document.getElementById('kpInput'), kiInput=document.getElementById('kiInput'), kdInput=document.getElementById('kdInput');
-const saveValuesBtn=document.getElementById('saveValuesBtn'), saveStatus=document.getElementById('saveStatus');
+const saveValuesBtn=document.getElementById('saveValuesBtn'), resetValuesBtn=document.getElementById('resetValuesBtn'), neutralBtn=document.getElementById('neutralBtn'), saveStatus=document.getElementById('saveStatus');
 const servoTxt=document.getElementById('servoTxt'), tableTxt=document.getElementById('tableTxt'), xTxt=document.getElementById('xTxt'), vTxt=document.getElementById('vTxt'), d1Txt=document.getElementById('d1Txt'), d2Txt=document.getElementById('d2Txt');
 let state={x:-1,v:0,speed_valid:false,servo_angle:90,stabilization:true,kp:0,ki:0,kd:0,ref:150,d1:-1,d2:-1};
-let sceneFrozen=false, plotRunning=false, angleFrozen=false, posFrozen=false, speedFrozen=false, plotStart=0, angleData=[], posData=[], speedData=[], lastStab=true, editing=false;
+let sceneFrozen=false, plotRunning=false, angleFrozen=false, posFrozen=false, speedFrozen=false, plotStart=0, angleData=[], posData=[], speedData=[], lastStab=true, editing=false, neutralTimer=null;
 function fit(c){const r=c.getBoundingClientRect(),d=window.devicePixelRatio||1;const w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));if(c.width!==w||c.height!==h){c.width=w;c.height=h}}
 function drawScene(){
 fit(scene);
@@ -229,9 +230,14 @@ c.fillStyle='#171717';
 c.font=`${Math.max(12,w*.025)}px Arial`;
 c.fillText(`${label} | 0-${xmax}s`,p+8,24);
 if(vals.length)c.fillText(`${vals[vals.length-1].toFixed(1)}`,w-90,24);
+if(label==='speed'&&vals.length){
+  const mn=Math.min(...vals),mx=Math.max(...vals);
+  c.font=`${Math.max(11,w*.021)}px Arial`;
+  c.fillText(`min ${mn.toFixed(0)} / max ${mx.toFixed(0)} mm/s`,p+8,h-12);
+}
 }
 function drawAll(){if(!sceneFrozen)drawScene();if(!angleFrozen)drawPlot(anglePlot,angleData,'#c43131','angle',false);if(!posFrozen)drawPlot(posPlot,posData,'#2457b8','pos',false);if(!speedFrozen)drawPlot(speedPlot,speedData,'#208444','speed',false)}
-function updateTexts(){servoTxt.textContent=state.servo_angle;tableTxt.textContent=(state.servo_angle/2).toFixed(1);xTxt.textContent=state.x>=0?state.x:'--';vTxt.textContent=state.speed_valid?state.v:'--';d1Txt.textContent=state.d1>=0?state.d1:'--';d2Txt.textContent=state.d2>=0?state.d2:'--';stabToggle.textContent=state.stabilization?'||':'▶';manualSlider.disabled=state.stabilization;if(!editing){refInput.value=state.ref;kpInput.value=Number(state.kp).toFixed(3);kiInput.value=Number(state.ki).toFixed(3);kdInput.value=Number(state.kd).toFixed(3)}if(lastStab&&!state.stabilization)manualSlider.value=state.servo_angle;lastStab=state.stabilization}
+function updateTexts(){if(state.stabilization&&neutralTimer){clearInterval(neutralTimer);neutralTimer=null}servoTxt.textContent=state.servo_angle;tableTxt.textContent=(state.servo_angle/2).toFixed(1);xTxt.textContent=state.x>=0?state.x:'--';vTxt.textContent=state.speed_valid?state.v:'--';d1Txt.textContent=state.d1>=0?state.d1:'--';d2Txt.textContent=state.d2>=0?state.d2:'--';stabToggle.textContent=state.stabilization?'||':'▶';manualSlider.disabled=state.stabilization;neutralBtn.disabled=state.stabilization;if(!editing){refInput.value=state.ref;kpInput.value=Number(state.kp).toFixed(3);kiInput.value=Number(state.ki).toFixed(3);kdInput.value=Number(state.kd).toFixed(3)}if(lastStab&&!state.stabilization)manualSlider.value=state.servo_angle;lastStab=state.stabilization}
 async function fetchState(){try{const r=await fetch('/api/state',{cache:'no-store'});state=await r.json();updateTexts();if(plotRunning){const t=(performance.now()-plotStart)/1000;if(t<=MAX_PLOT_S){angleData.push({t,y:state.servo_angle/2});posData.push({t,y:state.x>=0?state.x:NaN});speedData.push({t,y:state.speed_valid?state.v:NaN});plotInfo.textContent=`Plot running: ${t.toFixed(1)} s / 30 s`}else{plotRunning=false;plotToggle.textContent='Go';plotInfo.textContent='30 s reached. Plot stopped.'}}drawAll()}catch(e){}}
 function startPlot(){angleData=[];posData=[];speedData=[];plotStart=performance.now();plotRunning=true;angleFrozen=false;posFrozen=false;speedFrozen=false;plotToggle.textContent='Stop';plotInfo.textContent='Plot running'}
 function stopPlot(){plotRunning=false;plotToggle.textContent='Go';plotInfo.textContent='Plot frozen. Press Go to restart from 0.'}
@@ -247,6 +253,20 @@ saveValuesBtn.onclick=async()=>{
   saveValuesBtn.disabled=true;saveStatus.textContent='Saving...';
   try{await fetch(`/api/params/save?${q}`,{cache:'no-store'});saveStatus.textContent='Saved.';fetchState()}catch(e){saveStatus.textContent='Save failed.'}
   setTimeout(()=>{saveValuesBtn.disabled=false},2000);
+};
+resetValuesBtn.onclick=async()=>{saveStatus.textContent='Resetting...';try{await fetch('/api/params/reload',{cache:'no-store'});saveStatus.textContent='Restored saved values.';fetchState()}catch(e){saveStatus.textContent='Reset failed.'}};
+neutralBtn.onclick=()=>{
+  if(state.stabilization)return;
+  if(neutralTimer)clearInterval(neutralTimer);
+  const start=Number(manualSlider.value||state.servo_angle),target=90,duration=900,period=45,t0=performance.now();
+  neutralBtn.disabled=true;
+  neutralTimer=setInterval(()=>{
+    const u=Math.min(1,(performance.now()-t0)/duration);
+    const angle=Math.round(start+(target-start)*u);
+    manualSlider.value=angle;servoTxt.textContent=angle;tableTxt.textContent=(angle/2).toFixed(1);
+    fetch(`/api/control?angle=${angle}`,{cache:'no-store'});
+    if(u>=1){clearInterval(neutralTimer);neutralTimer=null;fetchState()}
+  },period);
 };
 window.onresize=drawAll;setInterval(fetchState,REFRESH_MS);fetchState();
 </script>
@@ -337,7 +357,7 @@ input{height:42px;border:3px solid #202020;background:white;font-size:20px;paddi
 <section class="panel">
 <h1 id="title">Calibration</h1>
 <p class="msg" id="instruction">Chargement...</p>
-<div class="row"><span class="dot" id="dot"></span><b id="rawTxt">--</b><span id="tofTxt">--</span></div>
+<div class="row" id="rawRow"><span class="dot" id="dot"></span><b id="rawTxt">--</b><span id="tofTxt">--</span></div>
 <div class="row" id="realRow"><label for="realInput"><b>Distance reelle au FOV max</b></label><input id="realInput" type="number" min="1" max="400" step="1"><span>mm</span></div>
 <div class="row">
 <button id="doneBtn">Done</button>
@@ -351,7 +371,7 @@ input{height:42px;border:3px solid #202020;background:white;font-size:20px;paddi
 </div>
 <script>
 const TABLE_LEN_MM=290, REFRESH_MS=80;
-const scene=document.getElementById('calScene'),dot=document.getElementById('dot'),rawTxt=document.getElementById('rawTxt'),tofTxt=document.getElementById('tofTxt');
+const scene=document.getElementById('calScene'),dot=document.getElementById('dot'),rawTxt=document.getElementById('rawTxt'),tofTxt=document.getElementById('tofTxt'),rawRow=document.getElementById('rawRow');
 const title=document.getElementById('title'),instruction=document.getElementById('instruction'),statusEl=document.getElementById('status');
 const realRow=document.getElementById('realRow'),realInput=document.getElementById('realInput');
 const doneBtn=document.getElementById('doneBtn'),submitBtn=document.getElementById('submitBtn'),acceptBtn=document.getElementById('acceptBtn'),restartBtn=document.getElementById('restartBtn'),cancelBtn=document.getElementById('cancelBtn');
@@ -373,9 +393,12 @@ c.font=`${Math.max(14,w*.018)}px Arial`;c.fillText(`visual pos=${Math.round(pos)
 }
 function setButtons(){
 const verifyOnly=params.get('verify')==='1';
+const verifyStep=s.step==='verify';
 doneBtn.classList.toggle('hidden',!s.needs_done);
 submitBtn.classList.toggle('hidden',!s.needs_real_input);
 realRow.classList.toggle('hidden',!s.needs_real_input);
+rawRow.classList.toggle('hidden',verifyStep);
+statusEl.classList.toggle('hidden',verifyStep);
 acceptBtn.classList.toggle('hidden',s.step!=='verify');
 restartBtn.classList.toggle('hidden',false);
 cancelBtn.classList.toggle('hidden',params.get('initial')==='1');
@@ -1115,6 +1138,16 @@ static void setup_routes(void) {
 
     update_controller_params_from_request();
     save_controller_settings();
+    send_state();
+  });
+
+  server.on("/api/params/reload", HTTP_GET, []() {
+    if (!distance_sensors_calibrated) {
+      server.send(423, "application/json; charset=utf-8", "{\"calibrated\":false}");
+      return;
+    }
+
+    load_controller_settings();
     send_state();
   });
 
