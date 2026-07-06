@@ -18,10 +18,12 @@ static const uint32_t WEB_TASK_DELAY_MS = 1;
 static const char *CALIBRATION_NAMESPACE = "tof_cal";
 static const char *CALIBRATION_DONE_KEY = "done";
 static const char *CALIBRATION_VERSION_KEY = "version";
-static const uint32_t CALIBRATION_SCHEMA_VERSION = 3;
+static const uint32_t CALIBRATION_SCHEMA_VERSION = 4;
 static const char *CONTROLLER_NAMESPACE = "ctrl";
 static const char *CONTROLLER_VERSION_KEY = "version";
 static const uint32_t CONTROLLER_SCHEMA_VERSION = 1;
+static const uint32_t CONTROLLER_SAVE_COOLDOWN_MS = 2000;
+static const float CONTROLLER_SAVE_FLOAT_EPSILON = 0.000001f;
 
 static WebServer server(80);
 static TaskHandle_t web_task_handle = nullptr;
@@ -46,6 +48,7 @@ enum CalibrationMode {
   CAL_MODE_INITIAL_BOTH,
   CAL_MODE_MANUAL_TOF1,
   CAL_MODE_MANUAL_TOF2,
+  CAL_MODE_VERIFY_ONLY,
 };
 
 struct TofCalibrationDraft {
@@ -62,6 +65,7 @@ static CalibrationStep calibration_step = CAL_TOF1_FIND_FOV;
 static CalibrationMode calibration_mode = CAL_MODE_INITIAL_BOTH;
 static bool calibration_flow_done = false;
 static String calibration_error_msg = "";
+static uint32_t last_controller_save_request_ms = 0;
 
 static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!doctype html>
@@ -242,7 +246,7 @@ saveValuesBtn.onclick=async()=>{
   const q=`ref=${refInput.value}&kp=${kpInput.value}&ki=${kiInput.value}&kd=${kdInput.value}`;
   saveValuesBtn.disabled=true;saveStatus.textContent='Saving...';
   try{await fetch(`/api/params/save?${q}`,{cache:'no-store'});saveStatus.textContent='Saved.';fetchState()}catch(e){saveStatus.textContent='Save failed.'}
-  saveValuesBtn.disabled=false;
+  setTimeout(()=>{saveValuesBtn.disabled=false},2000);
 };
 window.onresize=drawAll;setInterval(fetchState,REFRESH_MS);fetchState();
 </script>
@@ -304,6 +308,7 @@ button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:22p
 <button onclick="location.href='/calibration?manual=1&target=1'">Calibrate TOF 1</button>
 <button onclick="location.href='/calibration?manual=1&target=2'">Calibrate TOF 2</button>
 </div>
+<button class="back" onclick="location.href='/calibration?verify=1'">Verify calibration</button>
 <a class="back" href="/">Retour</a>
 </section>
 </body>
@@ -353,6 +358,8 @@ const doneBtn=document.getElementById('doneBtn'),submitBtn=document.getElementBy
 let s={};
 const params=new URLSearchParams(location.search);
 let startupDone=false;
+let realInputEditing=false;
+let lastInputStep='';
 function fit(c){const r=c.getBoundingClientRect(),d=window.devicePixelRatio||1;const w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));if(c.width!==w||c.height!==h){c.width=w;c.height=h}}
 function drawScene(){
 fit(scene);const c=scene.getContext('2d'),w=scene.width,h=scene.height;c.clearRect(0,0,w,h);c.lineWidth=4;c.strokeStyle='#171717';c.fillStyle='#171717';
@@ -361,17 +368,32 @@ c.beginPath();c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke();c.beginPath();c.moveTo(
 let pos=s.visual_pos_mm; if(!Number.isFinite(pos)||pos<0)pos=TABLE_LEN_MM/2; pos=Math.max(0,Math.min(TABLE_LEN_MM,pos)); const p=pos/TABLE_LEN_MM;
 const r=Math.max(15,Math.min(w,h)*.045),contactX=x1+(x2-x1)*p,contactY=y1+(y2-y1)*p,bx=contactX+nx*r,by=contactY+ny*r;
 c.beginPath();c.arc(bx,by,r,0,Math.PI*2);c.stroke();c.beginPath();c.moveTo(bx-r*.65,by-r*.65);c.lineTo(bx+r*.65,by+r*.65);c.moveTo(bx+r*.65,by-r*.65);c.lineTo(bx-r*.65,by+r*.65);c.stroke();
-if(s.step==='verify'){[0,72,145].forEach(mm=>{const x=x1+(x2-x1)*(mm/TABLE_LEN_MM);c.strokeStyle='#208444';c.fillStyle='#208444';c.lineWidth=3;c.beginPath();c.moveTo(x,cy+30);c.lineTo(x,cy+70);c.stroke();c.beginPath();c.moveTo(x,cy+24);c.lineTo(x-8,cy+42);c.lineTo(x+8,cy+42);c.closePath();c.fill();c.fillText(`${mm}`,x-10,cy+90)});c.strokeStyle='#171717';c.fillStyle='#171717'}
+if(s.step==='verify'){[0,72,145,218,290].forEach(mm=>{const x=x1+(x2-x1)*(mm/TABLE_LEN_MM);c.strokeStyle='#208444';c.fillStyle='#208444';c.lineWidth=3;c.beginPath();c.moveTo(x,cy+30);c.lineTo(x,cy+70);c.stroke();c.beginPath();c.moveTo(x,cy+24);c.lineTo(x-8,cy+42);c.lineTo(x+8,cy+42);c.closePath();c.fill();c.fillText(`${mm}`,x-10,cy+90)});c.strokeStyle='#171717';c.fillStyle='#171717'}
 c.font=`${Math.max(14,w*.018)}px Arial`;c.fillText(`visual pos=${Math.round(pos)} mm`,18,h-22);
 }
 function setButtons(){
+const verifyOnly=params.get('verify')==='1';
 doneBtn.classList.toggle('hidden',!s.needs_done);
 submitBtn.classList.toggle('hidden',!s.needs_real_input);
 realRow.classList.toggle('hidden',!s.needs_real_input);
 acceptBtn.classList.toggle('hidden',s.step!=='verify');
 restartBtn.classList.toggle('hidden',false);
 cancelBtn.classList.toggle('hidden',params.get('initial')==='1');
-if(s.needs_real_input && !realInput.value)realInput.value=s.real_fov||145;
+if(verifyOnly){
+  doneBtn.classList.remove('hidden');
+  submitBtn.classList.add('hidden');
+  acceptBtn.classList.add('hidden');
+  restartBtn.classList.add('hidden');
+  cancelBtn.classList.add('hidden');
+  realRow.classList.add('hidden');
+  doneBtn.textContent='Done';
+}else{
+  doneBtn.textContent='Done';
+}
+if(s.needs_real_input && !realInputEditing && (s.step!==lastInputStep || !realInput.value)){
+  realInput.value=s.real_fov||145;
+}
+lastInputStep=s.step||'';
 }
 function update(){
 title.textContent=s.title||'Calibration';
@@ -386,12 +408,15 @@ async function ensureStarted(){
 if(startupDone)return;
 startupDone=true;
 if(params.get('initial')==='1')await fetch('/api/calibration/action?cmd=start&mode=initial',{cache:'no-store'});
+else if(params.get('verify')==='1')await fetch('/api/calibration/action?cmd=start&mode=verify',{cache:'no-store'});
 else if(params.get('target')==='1')await fetch('/api/calibration/action?cmd=start&target=1',{cache:'no-store'});
 else if(params.get('target')==='2')await fetch('/api/calibration/action?cmd=start&target=2',{cache:'no-store'});
 }
 async function getState(){try{await ensureStarted();const r=await fetch('/api/calibration/state',{cache:'no-store'});s=await r.json();update()}catch(e){statusEl.textContent='Erreur reseau'}}
 async function action(q){doneBtn.disabled=submitBtn.disabled=acceptBtn.disabled=restartBtn.disabled=cancelBtn.disabled=true;try{const r=await fetch('/api/calibration/action?'+q,{cache:'no-store'});s=await r.json();update();if(s.done)setTimeout(()=>{location.href='/'},600)}catch(e){statusEl.textContent='Erreur action'}doneBtn.disabled=submitBtn.disabled=acceptBtn.disabled=restartBtn.disabled=cancelBtn.disabled=false}
-doneBtn.onclick=()=>action('cmd=done');
+realInput.onfocus=()=>{realInputEditing=true};
+realInput.onblur=()=>{realInputEditing=false};
+doneBtn.onclick=()=>{if(params.get('verify')==='1')location.href='/calibration_select';else action('cmd=done')};
 submitBtn.onclick=()=>action('cmd=real_fov&value='+encodeURIComponent(realInput.value||'145'));
 acceptBtn.onclick=()=>action('cmd=accept');
 restartBtn.onclick=()=>action('cmd=restart');
@@ -611,6 +636,25 @@ static int manual_calibration_target(void) {
   return 0;
 }
 
+static void start_verify_calibration(void) {
+  calibration_error_msg = "";
+  calibration_flow_done = false;
+  calibration_mode = CAL_MODE_VERIFY_ONLY;
+  calibration_step = CAL_VERIFY;
+
+  if (load_draft_from_preferences()) {
+    apply_draft_calibration(TOF1);
+    apply_draft_calibration(TOF2);
+    distance_sensors_calibrated = true;
+  } else {
+    reset_calibration_drafts();
+    calibration_mode = CAL_MODE_VERIFY_ONLY;
+    calibration_step = CAL_ERROR;
+    distance_sensors_calibrated = false;
+    calibration_error_msg = "Aucune calibration sauvegardee a verifier.";
+  }
+}
+
 static bool should_calibrate_target(const TofCalibrationDraft &draft, int target_mm) {
   return draft.real_fov > target_mm;
 }
@@ -675,7 +719,45 @@ static void load_controller_settings(void) {
   prefs.end();
 }
 
-static void save_controller_settings(void) {
+static bool controller_settings_match_saved(void) {
+  float kp;
+  float ki;
+  float kd;
+  get_controller_gains(&kp, &ki, &kd);
+
+  Preferences prefs;
+  prefs.begin(CONTROLLER_NAMESPACE, true);
+  uint32_t version = prefs.getUInt(CONTROLLER_VERSION_KEY, 0);
+
+  if (version != CONTROLLER_SCHEMA_VERSION) {
+    prefs.end();
+    return false;
+  }
+
+  int saved_reference_mm = prefs.getInt("ref", get_controller_reference_mm() + 1);
+  float saved_kp = prefs.getFloat("kp", kp + 1.0f);
+  float saved_ki = prefs.getFloat("ki", ki + 1.0f);
+  float saved_kd = prefs.getFloat("kd", kd + 1.0f);
+  prefs.end();
+
+  return saved_reference_mm == get_controller_reference_mm() &&
+         fabsf(saved_kp - kp) <= CONTROLLER_SAVE_FLOAT_EPSILON &&
+         fabsf(saved_ki - ki) <= CONTROLLER_SAVE_FLOAT_EPSILON &&
+         fabsf(saved_kd - kd) <= CONTROLLER_SAVE_FLOAT_EPSILON;
+}
+
+static bool save_controller_settings(void) {
+  uint32_t now = millis();
+  if (last_controller_save_request_ms != 0 &&
+      now - last_controller_save_request_ms < CONTROLLER_SAVE_COOLDOWN_MS) {
+    return false;
+  }
+  last_controller_save_request_ms = now;
+
+  if (controller_settings_match_saved()) {
+    return false;
+  }
+
   float kp;
   float ki;
   float kd;
@@ -689,6 +771,7 @@ static void save_controller_settings(void) {
   prefs.putFloat("ki", ki);
   prefs.putFloat("kd", kd);
   prefs.end();
+  return true;
 }
 
 static void update_controller_params_from_request(void) {
@@ -811,7 +894,7 @@ static void send_calibration_state(void) {
     case CAL_VERIFY:
       step_name = "verify";
       title = "Verification de la calibration";
-      instruction = "Verifiez que la position calibree est coherente. Les fleches vertes indiquent 0, 72 et 145 mm. Validez si tout est correct.";
+      instruction = "Verifiez que la position calibree est coherente. Les fleches vertes indiquent 0, 72, 145, 218 et 290 mm. Validez si tout est correct.";
       tof_number = 0;
       break;
     case CAL_ERROR:
@@ -848,6 +931,8 @@ static void handle_calibration_action(void) {
   if (cmd == "start") {
     if (server.arg("mode") == "initial") {
       start_initial_calibration();
+    } else if (server.arg("mode") == "verify") {
+      start_verify_calibration();
     } else if (server.arg("target").toInt() == TOF1) {
       start_manual_calibration(TOF1);
     } else if (server.arg("target").toInt() == TOF2) {
