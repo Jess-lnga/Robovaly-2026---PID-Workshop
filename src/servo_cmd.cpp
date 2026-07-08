@@ -14,6 +14,7 @@ static bool servo_initialized = false;
 
 static int servo_min_angle_deg = SERVO_CMD_MIN_DEG;
 static int servo_max_angle_deg = SERVO_CMD_MAX_DEG;
+static int servo_neutral_angle_deg = SERVO_CMD_NEUTRAL_DEG;
 static uint16_t servo_min_pulse_us = DEFAULT_MIN_PULSE_US;
 static uint16_t servo_max_pulse_us = DEFAULT_MAX_PULSE_US;
 
@@ -55,7 +56,7 @@ bool init_servo_cmd_on_pin(uint8_t servo_pin) {
     ledcAttachPin(servo_pin_used, SERVO_PWM_CHANNEL);
 
     servo_initialized = true;
-    servo_angle_deg = SERVO_CMD_NEUTRAL_DEG;
+    servo_angle_deg = servo_neutral_angle_deg;
 
     return set_servo_angle(servo_angle_deg);
 }
@@ -73,16 +74,37 @@ bool set_servo_angle(int angle_deg) {
 }
 
 void set_servo_angle_limits(int min_angle_deg, int max_angle_deg) {
-    if(min_angle_deg >= max_angle_deg) {
+    if(!set_servo_angle_range(min_angle_deg, max_angle_deg, servo_neutral_angle_deg)) {
         return;
+    }
+}
+
+bool set_servo_angle_range(int min_angle_deg, int max_angle_deg, int neutral_angle_deg) {
+    if(min_angle_deg < SERVO_CMD_MIN_DEG || max_angle_deg > SERVO_CMD_MAX_DEG) {
+        return false;
+    }
+
+    if(min_angle_deg >= max_angle_deg) {
+        return false;
+    }
+
+    if(neutral_angle_deg < min_angle_deg || neutral_angle_deg > max_angle_deg) {
+        return false;
     }
 
     servo_min_angle_deg = min_angle_deg;
     servo_max_angle_deg = max_angle_deg;
+    servo_neutral_angle_deg = neutral_angle_deg;
 
     if(servo_initialized) {
         set_servo_angle(servo_angle_deg);
     }
+
+    return true;
+}
+
+bool set_servo_neutral_angle_deg(int neutral_angle_deg) {
+    return set_servo_angle_range(servo_min_angle_deg, servo_max_angle_deg, neutral_angle_deg);
 }
 
 void set_servo_pulse_limits_us(uint16_t min_pulse_us, uint16_t max_pulse_us) {
@@ -108,4 +130,26 @@ bool servo_cmd_is_initialized(void) {
 
 int get_servo_angle(void) {
     return servo_angle_deg;
+}
+
+int get_servo_min_angle_deg(void) {
+    return servo_min_angle_deg;
+}
+
+int get_servo_max_angle_deg(void) {
+    return servo_max_angle_deg;
+}
+
+int get_servo_neutral_angle_deg(void) {
+    return servo_neutral_angle_deg;
+}
+
+void reset_servo_advanced_parameters(void) {
+    servo_min_angle_deg = SERVO_CMD_MIN_DEG;
+    servo_max_angle_deg = SERVO_CMD_MAX_DEG;
+    servo_neutral_angle_deg = SERVO_CMD_NEUTRAL_DEG;
+
+    if(servo_initialized) {
+        set_servo_angle(servo_angle_deg);
+    }
 }

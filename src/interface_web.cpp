@@ -18,12 +18,16 @@ static const uint32_t WEB_TASK_DELAY_MS = 1;
 static const char *CALIBRATION_NAMESPACE = "tof_cal";
 static const char *CALIBRATION_DONE_KEY = "done";
 static const char *CALIBRATION_VERSION_KEY = "version";
-static const uint32_t CALIBRATION_SCHEMA_VERSION = 4;
+static const uint32_t CALIBRATION_SCHEMA_VERSION = 6;
 static const char *CONTROLLER_NAMESPACE = "ctrl";
 static const char *CONTROLLER_VERSION_KEY = "version";
 static const uint32_t CONTROLLER_SCHEMA_VERSION = 1;
 static const uint32_t CONTROLLER_SAVE_COOLDOWN_MS = 2000;
 static const float CONTROLLER_SAVE_FLOAT_EPSILON = 0.000001f;
+static const char *ADVANCED_NAMESPACE = "advanced";
+static const char *ADVANCED_VERSION_KEY = "version";
+static const uint32_t ADVANCED_SCHEMA_VERSION = 1;
+static const uint32_t ADVANCED_SAVE_COOLDOWN_MS = 2000;
 
 static WebServer server(80);
 static TaskHandle_t web_task_handle = nullptr;
@@ -66,6 +70,7 @@ static CalibrationMode calibration_mode = CAL_MODE_INITIAL_BOTH;
 static bool calibration_flow_done = false;
 static String calibration_error_msg = "";
 static uint32_t last_controller_save_request_ms = 0;
+static uint32_t last_advanced_save_request_ms = 0;
 
 static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!doctype html>
@@ -104,6 +109,7 @@ button{cursor:pointer}button:disabled,input:disabled{opacity:.5;cursor:not-allow
     <button class="gearBtn" id="settingsBtn">&#9881;</button>
     <div class="settingsMenu" id="settingsMenu">
       <button class="menuBtn" id="calibrateBtn">Calibrate TOFs</button>
+      <button class="menuBtn" id="advancedBtn">Advanced parameters</button>
     </div>
     <canvas id="scene"></canvas>
   </div>
@@ -145,16 +151,16 @@ button{cursor:pointer}button:disabled,input:disabled{opacity:.5;cursor:not-allow
   </div>
 </div>
 <script>
-const TABLE_LEN_MM=290, REFRESH_MS=55, MAX_PLOT_S=30;
+let TABLE_LEN_MM=290; const REFRESH_MS=55, MAX_PLOT_S=30;
 const scene=document.getElementById('scene'), anglePlot=document.getElementById('anglePlot'), posPlot=document.getElementById('posPlot'), speedPlot=document.getElementById('speedPlot');
 const scenePause=document.getElementById('scenePause'), plotToggle=document.getElementById('plotToggle'), plotInfo=document.getElementById('plotInfo');
-const settingsBtn=document.getElementById('settingsBtn'), settingsMenu=document.getElementById('settingsMenu'), calibrateBtn=document.getElementById('calibrateBtn');
+const settingsBtn=document.getElementById('settingsBtn'), settingsMenu=document.getElementById('settingsMenu'), calibrateBtn=document.getElementById('calibrateBtn'), advancedBtn=document.getElementById('advancedBtn');
 const anglePause=document.getElementById('anglePause'), posPause=document.getElementById('posPause'), speedPause=document.getElementById('speedPause');
 const stabToggle=document.getElementById('stabToggle'), manualSlider=document.getElementById('manualSlider');
 const refInput=document.getElementById('refInput'), kpInput=document.getElementById('kpInput'), kiInput=document.getElementById('kiInput'), kdInput=document.getElementById('kdInput');
 const saveValuesBtn=document.getElementById('saveValuesBtn'), resetValuesBtn=document.getElementById('resetValuesBtn'), neutralBtn=document.getElementById('neutralBtn'), saveStatus=document.getElementById('saveStatus');
 const servoTxt=document.getElementById('servoTxt'), tableTxt=document.getElementById('tableTxt'), xTxt=document.getElementById('xTxt'), vTxt=document.getElementById('vTxt'), d1Txt=document.getElementById('d1Txt'), d2Txt=document.getElementById('d2Txt');
-let state={x:-1,v:0,speed_valid:false,servo_angle:90,stabilization:true,kp:0,ki:0,kd:0,ref:150,d1:-1,d2:-1};
+let state={x:-1,v:0,speed_valid:false,servo_angle:90,stabilization:true,kp:0,ki:0,kd:0,ref:150,d1:-1,d2:-1,servo_min:0,servo_max:180,servo_neutral:90};
 let sceneFrozen=false, plotRunning=false, angleFrozen=false, posFrozen=false, speedFrozen=false, plotStart=0, angleData=[], posData=[], speedData=[], lastStab=true, editing=false, neutralTimer=null;
 function fit(c){const r=c.getBoundingClientRect(),d=window.devicePixelRatio||1;const w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));if(c.width!==w||c.height!==h){c.width=w;c.height=h}}
 function drawScene(){
@@ -237,8 +243,8 @@ if(label==='speed'&&vals.length){
 }
 }
 function drawAll(){if(!sceneFrozen)drawScene();if(!angleFrozen)drawPlot(anglePlot,angleData,'#c43131','angle',false);if(!posFrozen)drawPlot(posPlot,posData,'#2457b8','pos',false);if(!speedFrozen)drawPlot(speedPlot,speedData,'#208444','speed',false)}
-function updateTexts(){if(state.stabilization&&neutralTimer){clearInterval(neutralTimer);neutralTimer=null}servoTxt.textContent=state.servo_angle;tableTxt.textContent=(state.servo_angle/2).toFixed(1);xTxt.textContent=state.x>=0?state.x:'--';vTxt.textContent=state.speed_valid?state.v:'--';d1Txt.textContent=state.d1>=0?state.d1:'--';d2Txt.textContent=state.d2>=0?state.d2:'--';stabToggle.textContent=state.stabilization?'||':'▶';manualSlider.disabled=state.stabilization;neutralBtn.disabled=state.stabilization;if(!editing){refInput.value=state.ref;kpInput.value=Number(state.kp).toFixed(3);kiInput.value=Number(state.ki).toFixed(3);kdInput.value=Number(state.kd).toFixed(3)}if(lastStab&&!state.stabilization)manualSlider.value=state.servo_angle;lastStab=state.stabilization}
-async function fetchState(){try{const r=await fetch('/api/state',{cache:'no-store'});state=await r.json();updateTexts();if(plotRunning){const t=(performance.now()-plotStart)/1000;if(t<=MAX_PLOT_S){angleData.push({t,y:state.servo_angle/2});posData.push({t,y:state.x>=0?state.x:NaN});speedData.push({t,y:state.speed_valid?state.v:NaN});plotInfo.textContent=`Plot running: ${t.toFixed(1)} s / 30 s`}else{plotRunning=false;plotToggle.textContent='Go';plotInfo.textContent='30 s reached. Plot stopped.'}}drawAll()}catch(e){}}
+function updateTexts(){if(state.stabilization&&neutralTimer){clearInterval(neutralTimer);neutralTimer=null}servoTxt.textContent=state.servo_angle;tableTxt.textContent=(state.servo_angle/2).toFixed(1);xTxt.textContent=state.x>=0?state.x:'--';vTxt.textContent=state.speed_valid?state.v:'--';d1Txt.textContent=state.d1>=0?state.d1:'--';d2Txt.textContent=state.d2>=0?state.d2:'--';stabToggle.textContent=state.stabilization?'||':'▶';manualSlider.min=state.servo_min||0;manualSlider.max=state.servo_max||180;manualSlider.disabled=state.stabilization;neutralBtn.disabled=state.stabilization;if(!editing){refInput.value=state.ref;kpInput.value=Number(state.kp).toFixed(3);kiInput.value=Number(state.ki).toFixed(3);kdInput.value=Number(state.kd).toFixed(3)}if(lastStab&&!state.stabilization)manualSlider.value=state.servo_angle;lastStab=state.stabilization}
+async function fetchState(){try{const r=await fetch('/api/state',{cache:'no-store'});state=await r.json();TABLE_LEN_MM=state.table_length||290;updateTexts();if(plotRunning){const t=(performance.now()-plotStart)/1000;if(t<=MAX_PLOT_S){angleData.push({t,y:state.servo_angle/2});posData.push({t,y:state.x>=0?state.x:NaN});speedData.push({t,y:state.speed_valid?state.v:NaN});plotInfo.textContent=`Plot running: ${t.toFixed(1)} s / 30 s`}else{plotRunning=false;plotToggle.textContent='Go';plotInfo.textContent='30 s reached. Plot stopped.'}}drawAll()}catch(e){}}
 function startPlot(){angleData=[];posData=[];speedData=[];plotStart=performance.now();plotRunning=true;angleFrozen=false;posFrozen=false;speedFrozen=false;plotToggle.textContent='Stop';plotInfo.textContent='Plot running'}
 function stopPlot(){plotRunning=false;plotToggle.textContent='Go';plotInfo.textContent='Plot frozen. Press Go to restart from 0.'}
 plotToggle.onclick=()=>plotRunning?stopPlot():startPlot();scenePause.onclick=()=>{sceneFrozen=!sceneFrozen;scenePause.textContent=sceneFrozen?'▶':'||'};anglePause.onclick=()=>{angleFrozen=!angleFrozen;anglePause.textContent=angleFrozen?'▶':'||'};posPause.onclick=()=>{posFrozen=!posFrozen;posPause.textContent=posFrozen?'▶':'||'};speedPause.onclick=()=>{speedFrozen=!speedFrozen;speedPause.textContent=speedFrozen?'▶':'||'};
@@ -248,6 +254,7 @@ manualSlider.onchange=()=>{fetch(`/api/control?angle=${manualSlider.value}`,{cac
 [refInput,kpInput,kiInput,kdInput].forEach(el=>{el.onfocus=()=>editing=true;el.onblur=()=>editing=false;el.onchange=()=>{const q=`ref=${refInput.value}&kp=${kpInput.value}&ki=${kiInput.value}&kd=${kdInput.value}`;fetch(`/api/params?${q}`,{cache:'no-store'}).then(fetchState)}});
 settingsBtn.onclick=()=>settingsMenu.classList.toggle('open');
 calibrateBtn.onclick=()=>{location.href='/calibration_select'};
+advancedBtn.onclick=()=>{location.href='/advanced'};
 saveValuesBtn.onclick=async()=>{
   const q=`ref=${refInput.value}&kp=${kpInput.value}&ki=${kiInput.value}&kd=${kdInput.value}`;
   saveValuesBtn.disabled=true;saveStatus.textContent='Saving...';
@@ -258,7 +265,7 @@ resetValuesBtn.onclick=async()=>{saveStatus.textContent='Resetting...';try{await
 neutralBtn.onclick=()=>{
   if(state.stabilization)return;
   if(neutralTimer)clearInterval(neutralTimer);
-  const start=Number(manualSlider.value||state.servo_angle),target=90,duration=900,period=45,t0=performance.now();
+  const start=Number(manualSlider.value||state.servo_angle),target=Number(state.servo_neutral||90),duration=900,period=45,t0=performance.now();
   neutralBtn.disabled=true;
   neutralTimer=setInterval(()=>{
     const u=Math.min(1,(performance.now()-t0)/duration);
@@ -331,6 +338,70 @@ button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:22p
 <button class="back" onclick="location.href='/calibration?verify=1'">Verify calibration</button>
 <a class="back" href="/">Retour</a>
 </section>
+</body>
+</html>
+)rawliteral";
+
+static const char ADVANCED_HTML[] PROGMEM = R"rawliteral(
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Advanced parameters</title>
+<style>
+body{margin:0;min-height:100vh;background:#f4f1e8;color:#171717;font-family:Arial,Helvetica,sans-serif;padding:14px}
+.app{width:min(980px,100%);margin:0 auto;display:grid;gap:12px}.panel{background:#fffdf6;border:3px solid #202020;border-radius:4px;padding:16px}
+h1{font-size:28px;margin:0 0 10px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.form{display:grid;grid-template-columns:1fr 150px;gap:10px;align-items:center}
+label{font-weight:800}input{height:38px;border:3px solid #202020;background:white;font-size:18px;padding:4px 8px;width:100%}
+button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:18px;font-weight:900;padding:10px 14px;cursor:pointer;text-decoration:none;text-align:center}.actions{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}.small{font-size:13px;color:#666}
+@media(max-width:760px){.grid{grid-template-columns:1fr}.form{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="app">
+<section class="panel"><h1>Advanced parameters</h1><div class="small" id="status">Runtime parameters. Use reset to restore development defaults.</div></section>
+<div class="grid">
+<section class="panel"><h1>Position and speed filtering</h1><div class="form">
+<label>Position moving average window</label><input id="posWin" type="number" min="1" max="20" step="1">
+<label>Speed moving average window</label><input id="speedWin" type="number" min="1" max="20" step="1">
+</div></section>
+<section class="panel"><h1>PID controller</h1><div class="form">
+<label>Max angle step / cycle</label><input id="maxStep" type="number" min="0" max="180" step="1">
+<label>Position precision</label><input id="posDb" type="number" min="0" max="50" step="1">
+<label>Speed precision</label><input id="speedDb" type="number" min="0" max="300" step="1">
+<label>Lost ball delay</label><input id="lostDelay" type="number" min="0" max="10000" step="100">
+<label>Lost ball iter</label><input id="lostIter" type="number" min="1" max="20" step="1">
+</div></section>
+<section class="panel"><h1>Servo</h1><div class="form">
+<label>Min angle</label><input id="servoMin" type="number" min="0" max="180" step="1">
+<label>Max angle</label><input id="servoMax" type="number" min="0" max="180" step="1">
+<label>Neutral angle</label><input id="servoNeutral" type="number" min="0" max="180" step="1">
+</div></section>
+<section class="panel"><h1>Geometry</h1><div class="form">
+<label>Table length</label><input id="tableLen" type="number" min="1" max="300" step="1">
+</div></section>
+</div>
+<section class="panel actions">
+<button id="resetBtn">RESET TO DEFAULT VALUES</button>
+<button id="saveBtn">Save parameters</button>
+<button id="applyBtn">Apply</button>
+<a href="/">Back</a>
+</section>
+</div>
+<script>
+const ids=['posWin','speedWin','maxStep','posDb','speedDb','lostDelay','lostIter','servoMin','servoMax','servoNeutral','tableLen'];
+const el=Object.fromEntries(ids.map(id=>[id,document.getElementById(id)]));
+const statusEl=document.getElementById('status');
+const saveBtn=document.getElementById('saveBtn');
+function fill(s){el.posWin.value=s.position_window;el.speedWin.value=s.speed_window;el.maxStep.value=s.max_step;el.posDb.value=s.position_deadband;el.speedDb.value=s.speed_deadband;el.lostDelay.value=s.lost_delay;el.lostIter.value=s.lost_iter;el.servoMin.value=s.servo_min;el.servoMax.value=s.servo_max;el.servoNeutral.value=s.servo_neutral;el.tableLen.value=s.table_length}
+async function load(){try{const r=await fetch('/api/advanced',{cache:'no-store'});fill(await r.json())}catch(e){statusEl.textContent='Load failed.'}}
+function query(){return `pos_win=${el.posWin.value}&speed_win=${el.speedWin.value}&max_step=${el.maxStep.value}&pos_db=${el.posDb.value}&speed_db=${el.speedDb.value}&lost_delay=${el.lostDelay.value}&lost_iter=${el.lostIter.value}&servo_min=${el.servoMin.value}&servo_max=${el.servoMax.value}&servo_neutral=${el.servoNeutral.value}&table_len=${el.tableLen.value}`}
+document.getElementById('applyBtn').onclick=async()=>{statusEl.textContent='Applying...';try{const r=await fetch('/api/advanced/set?'+query(),{cache:'no-store'});const s=await r.json();fill(s);statusEl.textContent=s.ok?'Applied.':'Some values were rejected.'}catch(e){statusEl.textContent='Apply failed.'}};
+document.getElementById('resetBtn').onclick=async()=>{statusEl.textContent='Resetting...';try{const r=await fetch('/api/advanced/reset',{cache:'no-store'});fill(await r.json());statusEl.textContent='Defaults restored.'}catch(e){statusEl.textContent='Reset failed.'}};
+saveBtn.onclick=async()=>{statusEl.textContent='Saving...';saveBtn.disabled=true;try{const r=await fetch('/api/advanced/save?'+query(),{cache:'no-store'});const s=await r.json();fill(s);statusEl.textContent=s.ok?'Saved.':'Some values were rejected.'}catch(e){statusEl.textContent='Save failed.'}setTimeout(()=>{saveBtn.disabled=false},2000)};
+load();
+</script>
 </body>
 </html>
 )rawliteral";
@@ -831,10 +902,181 @@ static void send_state(void) {
   json += "\"ref\":" + String(get_controller_reference_mm()) + ",";
   json += "\"kp\":" + String(kp, 6) + ",";
   json += "\"ki\":" + String(ki, 6) + ",";
-  json += "\"kd\":" + String(kd, 6);
+  json += "\"kd\":" + String(kd, 6) + ",";
+  json += "\"table_length\":" + String(get_table_length_mm()) + ",";
+  json += "\"servo_min\":" + String(get_servo_min_angle_deg()) + ",";
+  json += "\"servo_max\":" + String(get_servo_max_angle_deg()) + ",";
+  json += "\"servo_neutral\":" + String(get_servo_neutral_angle_deg());
   json += "}";
 
   server.send(200, "application/json; charset=utf-8", json);
+}
+
+static void send_advanced_state(bool ok = true) {
+  String json = "{";
+  json += "\"ok\":" + String(ok ? "true" : "false") + ",";
+  json += "\"position_window\":" + String(get_position_filter_window()) + ",";
+  json += "\"speed_window\":" + String(get_speed_filter_window()) + ",";
+  json += "\"max_step\":" + String(get_controller_max_step_deg()) + ",";
+  json += "\"position_deadband\":" + String(get_controller_stabilization_position_deadband_mm()) + ",";
+  json += "\"speed_deadband\":" + String(get_controller_stabilization_speed_deadband_mm_s()) + ",";
+  json += "\"lost_delay\":" + String(get_controller_lost_ball_delay_ms()) + ",";
+  json += "\"lost_iter\":" + String(get_controller_lost_ball_iter()) + ",";
+  json += "\"servo_min\":" + String(get_servo_min_angle_deg()) + ",";
+  json += "\"servo_max\":" + String(get_servo_max_angle_deg()) + ",";
+  json += "\"servo_neutral\":" + String(get_servo_neutral_angle_deg()) + ",";
+  json += "\"table_length\":" + String(get_table_length_mm());
+  json += "}";
+  server.send(200, "application/json; charset=utf-8", json);
+}
+
+static bool update_advanced_params_from_request(void) {
+  bool ok = true;
+
+  if (server.hasArg("pos_win")) {
+    ok = set_position_filter_window(server.arg("pos_win").toInt()) && ok;
+  }
+
+  if (server.hasArg("speed_win")) {
+    ok = set_speed_filter_window(server.arg("speed_win").toInt()) && ok;
+  }
+
+  if (server.hasArg("max_step")) {
+    ok = set_controller_max_step_deg(server.arg("max_step").toInt()) && ok;
+  }
+
+  if (server.hasArg("pos_db")) {
+    ok = set_controller_stabilization_position_deadband_mm(server.arg("pos_db").toInt()) && ok;
+  }
+
+  if (server.hasArg("speed_db")) {
+    ok = set_controller_stabilization_speed_deadband_mm_s(server.arg("speed_db").toInt()) && ok;
+  }
+
+  if (server.hasArg("lost_delay")) {
+    ok = set_controller_lost_ball_delay_ms((uint32_t)server.arg("lost_delay").toInt()) && ok;
+  }
+
+  if (server.hasArg("lost_iter")) {
+    ok = set_controller_lost_ball_iter(server.arg("lost_iter").toInt()) && ok;
+  }
+
+  int servo_min = get_servo_min_angle_deg();
+  int servo_max = get_servo_max_angle_deg();
+  int servo_neutral = get_servo_neutral_angle_deg();
+
+  if (server.hasArg("servo_min")) servo_min = server.arg("servo_min").toInt();
+  if (server.hasArg("servo_max")) servo_max = server.arg("servo_max").toInt();
+  if (server.hasArg("servo_neutral")) servo_neutral = server.arg("servo_neutral").toInt();
+  if (server.hasArg("servo_min") || server.hasArg("servo_max") || server.hasArg("servo_neutral")) {
+    ok = set_servo_angle_range(servo_min, servo_max, servo_neutral) && ok;
+    reset_controller();
+  }
+
+  if (server.hasArg("table_len")) {
+    ok = set_table_length_mm(server.arg("table_len").toInt()) && ok;
+  }
+
+  return ok;
+}
+
+static void reset_all_advanced_parameters(void) {
+  reset_ball_position_advanced_parameters();
+  reset_servo_advanced_parameters();
+  reset_controller_advanced_parameters();
+}
+
+static bool advanced_settings_match_saved(void) {
+  Preferences prefs;
+  prefs.begin(ADVANCED_NAMESPACE, true);
+  uint32_t version = prefs.getUInt(ADVANCED_VERSION_KEY, 0);
+
+  if (version != ADVANCED_SCHEMA_VERSION) {
+    prefs.end();
+    return false;
+  }
+
+  bool same = prefs.getInt("pos_win", -1) == get_position_filter_window() &&
+              prefs.getInt("speed_win", -1) == get_speed_filter_window() &&
+              prefs.getInt("max_step", -1) == get_controller_max_step_deg() &&
+              prefs.getInt("pos_db", -1) == get_controller_stabilization_position_deadband_mm() &&
+              prefs.getInt("speed_db", -1) == get_controller_stabilization_speed_deadband_mm_s() &&
+              prefs.getUInt("lost_delay", UINT32_MAX) == get_controller_lost_ball_delay_ms() &&
+              prefs.getInt("lost_iter", -1) == get_controller_lost_ball_iter() &&
+              prefs.getInt("servo_min", -1) == get_servo_min_angle_deg() &&
+              prefs.getInt("servo_max", -1) == get_servo_max_angle_deg() &&
+              prefs.getInt("servo_neutral", -1) == get_servo_neutral_angle_deg() &&
+              prefs.getInt("table_len", -1) == get_table_length_mm();
+
+  prefs.end();
+  return same;
+}
+
+static bool save_advanced_settings(void) {
+  uint32_t now = millis();
+  if (last_advanced_save_request_ms != 0 &&
+      now - last_advanced_save_request_ms < ADVANCED_SAVE_COOLDOWN_MS) {
+    return false;
+  }
+  last_advanced_save_request_ms = now;
+
+  if (advanced_settings_match_saved()) {
+    return false;
+  }
+
+  Preferences prefs;
+  prefs.begin(ADVANCED_NAMESPACE, false);
+  prefs.putUInt(ADVANCED_VERSION_KEY, ADVANCED_SCHEMA_VERSION);
+  prefs.putInt("pos_win", get_position_filter_window());
+  prefs.putInt("speed_win", get_speed_filter_window());
+  prefs.putInt("max_step", get_controller_max_step_deg());
+  prefs.putInt("pos_db", get_controller_stabilization_position_deadband_mm());
+  prefs.putInt("speed_db", get_controller_stabilization_speed_deadband_mm_s());
+  prefs.putUInt("lost_delay", get_controller_lost_ball_delay_ms());
+  prefs.putInt("lost_iter", get_controller_lost_ball_iter());
+  prefs.putInt("servo_min", get_servo_min_angle_deg());
+  prefs.putInt("servo_max", get_servo_max_angle_deg());
+  prefs.putInt("servo_neutral", get_servo_neutral_angle_deg());
+  prefs.putInt("table_len", get_table_length_mm());
+  prefs.end();
+  return true;
+}
+
+static bool load_advanced_settings(void) {
+  Preferences prefs;
+  prefs.begin(ADVANCED_NAMESPACE, true);
+  uint32_t version = prefs.getUInt(ADVANCED_VERSION_KEY, 0);
+
+  if (version != ADVANCED_SCHEMA_VERSION) {
+    prefs.end();
+    return false;
+  }
+
+  int pos_win = prefs.getInt("pos_win", POSITION_FILTER_DEFAULT_WINDOW);
+  int speed_win = prefs.getInt("speed_win", SPEED_FILTER_DEFAULT_WINDOW);
+  int max_step = prefs.getInt("max_step", CONTROLLER_DEFAULT_MAX_STEP_DEG);
+  int pos_db = prefs.getInt("pos_db", CONTROLLER_DEFAULT_POSITION_DEADBAND_MM);
+  int speed_db = prefs.getInt("speed_db", CONTROLLER_DEFAULT_SPEED_DEADBAND_MM_S);
+  uint32_t lost_delay = prefs.getUInt("lost_delay", CONTROLLER_DEFAULT_LOST_BALL_DELAY_MS);
+  int lost_iter = prefs.getInt("lost_iter", CONTROLLER_DEFAULT_LOST_BALL_ITER);
+  int servo_min = prefs.getInt("servo_min", SERVO_CMD_MIN_DEG);
+  int servo_max = prefs.getInt("servo_max", SERVO_CMD_MAX_DEG);
+  int servo_neutral = prefs.getInt("servo_neutral", SERVO_CMD_NEUTRAL_DEG);
+  int table_len = prefs.getInt("table_len", TABLE_LENGTH_DEFAULT_MM);
+  prefs.end();
+
+  bool ok = true;
+  ok = set_position_filter_window(pos_win) && ok;
+  ok = set_speed_filter_window(speed_win) && ok;
+  ok = set_controller_max_step_deg(max_step) && ok;
+  ok = set_controller_stabilization_position_deadband_mm(pos_db) && ok;
+  ok = set_controller_stabilization_speed_deadband_mm_s(speed_db) && ok;
+  ok = set_controller_lost_ball_delay_ms(lost_delay) && ok;
+  ok = set_controller_lost_ball_iter(lost_iter) && ok;
+  ok = set_servo_angle_range(servo_min, servo_max, servo_neutral) && ok;
+  ok = set_table_length_mm(table_len) && ok;
+  reset_controller();
+  return ok;
 }
 
 static void send_calibration_state(void) {
@@ -1082,6 +1324,14 @@ static void setup_routes(void) {
     }
   });
 
+  server.on("/advanced", HTTP_GET, []() {
+    if (distance_sensors_calibrated) {
+      server.send_P(200, "text/html; charset=utf-8", ADVANCED_HTML);
+    } else {
+      server.send_P(200, "text/html; charset=utf-8", WELCOME_HTML);
+    }
+  });
+
   server.on("/api/calibrate", HTTP_GET, []() {
     handle_calibration_action();
   });
@@ -1100,6 +1350,47 @@ static void setup_routes(void) {
       return;
     }
     send_state();
+  });
+
+  server.on("/api/advanced", HTTP_GET, []() {
+    if (!distance_sensors_calibrated) {
+      server.send(423, "application/json; charset=utf-8", "{\"calibrated\":false}");
+      return;
+    }
+    send_advanced_state();
+  });
+
+  server.on("/api/advanced/set", HTTP_GET, []() {
+    if (!distance_sensors_calibrated) {
+      server.send(423, "application/json; charset=utf-8", "{\"calibrated\":false}");
+      return;
+    }
+
+    bool ok = update_advanced_params_from_request();
+    send_advanced_state(ok);
+  });
+
+  server.on("/api/advanced/reset", HTTP_GET, []() {
+    if (!distance_sensors_calibrated) {
+      server.send(423, "application/json; charset=utf-8", "{\"calibrated\":false}");
+      return;
+    }
+
+    reset_all_advanced_parameters();
+    send_advanced_state();
+  });
+
+  server.on("/api/advanced/save", HTTP_GET, []() {
+    if (!distance_sensors_calibrated) {
+      server.send(423, "application/json; charset=utf-8", "{\"calibrated\":false}");
+      return;
+    }
+
+    bool ok = update_advanced_params_from_request();
+    if (ok) {
+      save_advanced_settings();
+    }
+    send_advanced_state(ok);
   });
 
   server.on("/api/control", HTTP_GET, []() {
@@ -1164,6 +1455,7 @@ static void web_task(void *pv) {
     apply_draft_calibration(TOF1);
     apply_draft_calibration(TOF2);
   }
+  load_advanced_settings();
   load_controller_settings();
 
   WiFi.mode(WIFI_AP);

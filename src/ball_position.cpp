@@ -5,8 +5,8 @@
 
 // ------ GEOMETRICAL PARAMETERS ------
 static const int BALL_RADIUS_MM  = 20;
-static const int TABLE_LENGTH_MM = 290;
 static const int TABLE_INCERT_MM = 5;  
+static int table_length_mm = TABLE_LENGTH_DEFAULT_MM;
 
 
 
@@ -49,22 +49,24 @@ static bool fov2_greater_than_000_mm = false;
 
 
 // ------ MOVING AVERAGES ------
-static const int MV_AVG_LENGTH = 1;
-static int mv_avg_d1[MV_AVG_LENGTH] = {0};
-static int mv_avg_d2[MV_AVG_LENGTH] = {0};
+static int position_filter_window = POSITION_FILTER_DEFAULT_WINDOW;
+static int speed_filter_window = SPEED_FILTER_DEFAULT_WINDOW;
+static int mv_avg_d1[FILTER_MAX_WINDOW] = {0};
+static int mv_avg_d2[FILTER_MAX_WINDOW] = {0};
+static int mv_avg_speed[FILTER_MAX_WINDOW] = {0};
 
 static int index_mv_avg1 = 0;
 static int index_mv_avg2 = 0;
+static int index_mv_avg_speed = 0;
 
 static int d1 = 0;
 static int d2 = 0;
 
 static int count_d1 = 0;
 static int count_d2 = 0;
+static int count_speed = 0;
 
 // ------ BALL POSITION - SPEED - TIMESTAMPS ------
-static const float SPEED_FILTER_ALPHA = 0.30f;
-
 static int ball_position_mm = 0;
 static int ball_position_prev_mm = 0;
 
@@ -87,6 +89,32 @@ static bool d2_valid = false;
 static bool speed_valid = false;
 
 //////////////////////////////////////
+
+static int clamp_int_local(int value, int min_value, int max_value) {
+    if(value < min_value) return min_value;
+    if(value > max_value) return max_value;
+    return value;
+}
+
+static void reset_position_filter_buffers() {
+    memset(mv_avg_d1, 0, sizeof(mv_avg_d1));
+    memset(mv_avg_d2, 0, sizeof(mv_avg_d2));
+    index_mv_avg1 = 0;
+    index_mv_avg2 = 0;
+    count_d1 = 0;
+    count_d2 = 0;
+    d1 = 0;
+    d2 = 0;
+}
+
+static void reset_speed_filter_buffer() {
+    memset(mv_avg_speed, 0, sizeof(mv_avg_speed));
+    index_mv_avg_speed = 0;
+    count_speed = 0;
+    ball_speed_mm_per_s = 0;
+    ball_speed_filtered_mm_per_s = 0.0f;
+    speed_valid = false;
+}
 
 static const int EPSILON = 1;   
 int linearise_measure(int min_meas, int min_val, int max_meas, int max_val, int meas){
@@ -225,8 +253,8 @@ void update_tof_distances(){
        tof_1_update_ms != 0 &&
        tof_1_update_ms != last_processed_d1_ms){
         mv_avg_d1[index_mv_avg1] = staff_d1;
-        index_mv_avg1 = (index_mv_avg1 + 1) % MV_AVG_LENGTH;
-        if (count_d1 < MV_AVG_LENGTH) count_d1++;
+        index_mv_avg1 = (index_mv_avg1 + 1) % position_filter_window;
+        if (count_d1 < position_filter_window) count_d1++;
 
         last_processed_d1_ms = tof_1_update_ms;
         last_valid_d1_ms = tof_1_update_ms;
@@ -237,8 +265,8 @@ void update_tof_distances(){
        tof_2_update_ms != 0 &&
        tof_2_update_ms != last_processed_d2_ms){
         mv_avg_d2[index_mv_avg2] = staff_d2;
-        index_mv_avg2 = (index_mv_avg2 + 1) % MV_AVG_LENGTH;
-        if (count_d2 < MV_AVG_LENGTH) count_d2++;
+        index_mv_avg2 = (index_mv_avg2 + 1) % position_filter_window;
+        if (count_d2 < position_filter_window) count_d2++;
 
         last_processed_d2_ms = tof_2_update_ms;
         last_valid_d2_ms = tof_2_update_ms;
@@ -302,15 +330,17 @@ bool compute_ball_speed(){
     int delta_position_mm = ball_position_mm - ball_position_prev_mm;
     int raw_speed_mm_per_s = (delta_position_mm * 1000) / (int)dt_ms;
 
-    if(!speed_valid){
-        ball_speed_filtered_mm_per_s = (float)raw_speed_mm_per_s;
-    }
-    else{
-        ball_speed_filtered_mm_per_s += SPEED_FILTER_ALPHA *
-            ((float)raw_speed_mm_per_s - ball_speed_filtered_mm_per_s);
+    mv_avg_speed[index_mv_avg_speed] = raw_speed_mm_per_s;
+    index_mv_avg_speed = (index_mv_avg_speed + 1) % speed_filter_window;
+    if(count_speed < speed_filter_window) count_speed++;
+
+    int sum_speed = 0;
+    for(int i = 0; i < count_speed; i++){
+        sum_speed += mv_avg_speed[i];
     }
 
-    ball_speed_mm_per_s = (int)lroundf(ball_speed_filtered_mm_per_s);
+    ball_speed_mm_per_s = (count_speed > 0) ? (sum_speed / count_speed) : 0;
+    ball_speed_filtered_mm_per_s = (float)ball_speed_mm_per_s;
 
     ball_position_prev_mm = ball_position_mm;
     last_ball_position_update_ms = now;
@@ -336,11 +366,11 @@ bool compute_ball_position(){
             
             } else{
                 position_valid = true;
-                ball_position_mm = (TABLE_LENGTH_MM - d1_corr + d2_corr) / 2;
+                ball_position_mm = (table_length_mm - d1_corr + d2_corr) / 2;
             }
 
         }else if((d1_corr >= 0)&&(d2_corr < 0)){
-            ball_position_mm = TABLE_LENGTH_MM - d1_corr;
+            ball_position_mm = table_length_mm - d1_corr;
             position_valid = true;
 
         }else if((d1_corr < 0)&&(d2_corr >= 0)){
@@ -357,7 +387,7 @@ bool compute_ball_position(){
         d1_corr = linearise_tof_measure(TOF1, d1);
 
         if(d1_corr >= 0){
-            ball_position_mm = TABLE_LENGTH_MM - d1_corr;
+            ball_position_mm = table_length_mm - d1_corr;
             position_valid = true;
             
         }else{
@@ -417,6 +447,65 @@ int get_ball_speed(){
 
 bool is_ball_speed_valid(){
     return speed_valid;
+}
+
+bool set_position_filter_window(int window){
+    if(window < FILTER_MIN_WINDOW || window > FILTER_MAX_WINDOW){
+        return false;
+    }
+
+    if(window != position_filter_window){
+        position_filter_window = window;
+        reset_position_filter_buffers();
+    }
+
+    return true;
+}
+
+int get_position_filter_window(){
+    return position_filter_window;
+}
+
+bool set_speed_filter_window(int window){
+    if(window < FILTER_MIN_WINDOW || window > FILTER_MAX_WINDOW){
+        return false;
+    }
+
+    if(window != speed_filter_window){
+        speed_filter_window = window;
+        reset_speed_filter_buffer();
+        ball_position_prev_valid = false;
+    }
+
+    return true;
+}
+
+int get_speed_filter_window(){
+    return speed_filter_window;
+}
+
+bool set_table_length_mm(int new_table_length_mm){
+    if(new_table_length_mm <= 0 || new_table_length_mm > 300){
+        return false;
+    }
+
+    table_length_mm = new_table_length_mm;
+    ball_position_prev_valid = false;
+    reset_speed_filter_buffer();
+    return true;
+}
+
+int get_table_length_mm(){
+    return table_length_mm;
+}
+
+void reset_ball_position_advanced_parameters(){
+    table_length_mm = TABLE_LENGTH_DEFAULT_MM;
+    position_filter_window = POSITION_FILTER_DEFAULT_WINDOW;
+    speed_filter_window = SPEED_FILTER_DEFAULT_WINDOW;
+    reset_position_filter_buffers();
+    reset_speed_filter_buffer();
+    ball_position_prev_valid = false;
 }
 
 static size_t previous_line_length = 0;
