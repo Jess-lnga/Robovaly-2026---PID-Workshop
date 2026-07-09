@@ -8,6 +8,7 @@ static const uint32_t MIN_CONTROLLER_DT_MS = 5;
 static const float INTEGRAL_LIMIT_MM_S = 3000.0f;
 static const int SERVO_DEADBAND_DEG = 0;
 static const float SERVO_FILTER_ALPHA = 1.0f;
+static const int LOST_BALL_RETURN_STEP_DEG = 2;
 
 static bool controller_initialized = false;
 static bool controller_enabled = false;
@@ -48,7 +49,7 @@ static int command_to_servo_angle(float pid_command_deg) {
     return clamp_int((int)lroundf(angle), get_servo_min_angle_deg(), get_servo_max_angle_deg());
 }
 
-static int smooth_servo_angle(int raw_angle_deg) {
+static int smooth_servo_angle(int raw_angle_deg, int max_step_deg) {
     filtered_angle_deg += SERVO_FILTER_ALPHA * ((float)raw_angle_deg - filtered_angle_deg);
 
     int filtered_angle_int = clamp_int((int)lroundf(filtered_angle_deg),
@@ -60,8 +61,8 @@ static int smooth_servo_angle(int raw_angle_deg) {
     }
 
     return clamp_int(filtered_angle_int,
-                     last_angle_deg - servo_max_step_deg,
-                     last_angle_deg + servo_max_step_deg);
+                     last_angle_deg - max_step_deg,
+                     last_angle_deg + max_step_deg);
 }
 
 static void reset_pid_terms(void) {
@@ -70,8 +71,8 @@ static void reset_pid_terms(void) {
     filtered_angle_deg = (float)last_angle_deg;
 }
 
-static bool command_smoothed_angle(int raw_angle_deg) {
-    int angle_deg = smooth_servo_angle(raw_angle_deg);
+static bool command_smoothed_angle(int raw_angle_deg, int max_step_deg) {
+    int angle_deg = smooth_servo_angle(raw_angle_deg, max_step_deg);
 
     if(angle_deg == last_angle_deg) {
         last_update_valid = true;
@@ -88,6 +89,10 @@ static bool command_smoothed_angle(int raw_angle_deg) {
     return false;
 }
 
+static bool command_smoothed_angle(int raw_angle_deg) {
+    return command_smoothed_angle(raw_angle_deg, servo_max_step_deg);
+}
+
 static bool handle_lost_ball(uint32_t now) {
     if(lost_ball_start_ms == 0) {
         lost_ball_start_ms = now;
@@ -100,7 +105,7 @@ static bool handle_lost_ball(uint32_t now) {
     }
 
     if(now - lost_ball_start_ms >= lost_ball_delay_ms) {
-        command_smoothed_angle(get_servo_neutral_angle_deg());
+        command_smoothed_angle(get_servo_neutral_angle_deg(), LOST_BALL_RETURN_STEP_DEG);
         last_update_valid = false;
     }
     else {
