@@ -82,7 +82,12 @@ static bool servo_calibration_initial_in_progress = false;
 static String calibration_error_msg = "";
 static uint32_t last_controller_save_request_ms = 0;
 static uint32_t last_advanced_save_request_ms = 0;
+static uint32_t last_client_mode_update_ms = 0;
 static int plot_max_seconds = PLOT_DEFAULT_MAX_SECONDS;
+static bool web_client_present = false;
+static bool auto_stabilization_without_client = false;
+static bool client_mode_initialized = false;
+static bool neutral_return_pending = false;
 
 static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!doctype html>
@@ -102,8 +107,10 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 .settingsMenu{position:absolute;top:62px;right:10px;display:none;min-width:190px;background:#fffdf6;border:3px solid var(--line);padding:8px;z-index:5}
 .settingsMenu.open{display:grid;gap:8px}.menuBtn{border:3px solid var(--line);background:#f8f5ea;font-weight:800;font-size:16px;padding:9px 10px;text-align:left}
 .sectionTitle{text-align:center;font-size:25px;font-weight:800;margin:0 0 8px}
-.plotModeBtn{border:3px solid var(--line);background:#f8f5ea;font-weight:900;font-size:16px;padding:8px 12px;margin-left:8px;vertical-align:middle}
+.dataVizHeader{display:grid;gap:8px;justify-items:center;margin:0 0 8px}.plotActions{display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap}
+.plotModeBtn{border:3px solid var(--line);background:#f8f5ea;font-weight:900;font-size:16px;padding:8px 12px;vertical-align:middle}
 .plotModeBtn.active{background:#171717;color:#fffdf6}
+.toast{position:fixed;right:14px;bottom:14px;max-width:min(420px,calc(100vw - 28px));background:#171717;color:#fffdf6;border:3px solid var(--line);padding:10px 14px;font-weight:800;z-index:20;display:none}
 .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.plotBox{height:300px;position:relative}.plotBox canvas{width:100%;height:100%}
 .plotLabel{position:absolute;top:8px;right:50px;font-weight:800;text-decoration:underline}.plotBtn{position:absolute;top:8px;right:8px;width:34px;height:30px;border:3px solid var(--line);background:#f8f5ea;font-weight:900}
 .controls{display:grid;grid-template-columns:1fr 1fr;gap:10px}.formGrid{display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:center}
@@ -130,7 +137,10 @@ button{cursor:pointer}button:disabled,input:disabled{opacity:.5;cursor:not-allow
   </div>
 
   <div class="panel">
-    <div class="sectionTitle">- Data Viz - <button class="toggle" id="plotToggle">Go</button><button class="plotModeBtn" id="continuousPlotBtn">Continuous plot</button></div>
+    <div class="dataVizHeader">
+      <div class="sectionTitle">- Data Viz -</div>
+      <div class="plotActions"><button class="toggle" id="plotToggle">Go</button><button class="plotModeBtn" id="continuousPlotBtn">Continuous plot</button></div>
+    </div>
     <div class="grid">
       <div class="panel plotBox"><canvas id="anglePlot"></canvas><div class="plotLabel">Angle</div><button class="plotBtn" id="anglePause">||</button></div>
       <div class="panel plotBox"><canvas id="posPlot"></canvas><div class="plotLabel">Pos</div><button class="plotBtn" id="posPause">||</button></div>
@@ -165,10 +175,12 @@ button{cursor:pointer}button:disabled,input:disabled{opacity:.5;cursor:not-allow
     </div>
   </div>
 </div>
+<div class="toast" id="toast"></div>
 <script>
 let TABLE_LEN_MM=290, PLOT_MAX_S=30; const REFRESH_MS=55;
 const scene=document.getElementById('scene'), anglePlot=document.getElementById('anglePlot'), posPlot=document.getElementById('posPlot'), speedPlot=document.getElementById('speedPlot');
 const scenePause=document.getElementById('scenePause'), plotToggle=document.getElementById('plotToggle'), continuousPlotBtn=document.getElementById('continuousPlotBtn'), plotInfo=document.getElementById('plotInfo');
+const toast=document.getElementById('toast');
 const settingsBtn=document.getElementById('settingsBtn'), settingsMenu=document.getElementById('settingsMenu'), calibrateBtn=document.getElementById('calibrateBtn'), calibrateServoBtn=document.getElementById('calibrateServoBtn'), advancedBtn=document.getElementById('advancedBtn');
 const anglePause=document.getElementById('anglePause'), posPause=document.getElementById('posPause'), speedPause=document.getElementById('speedPause');
 const stabToggle=document.getElementById('stabToggle'), manualSlider=document.getElementById('manualSlider');
@@ -177,6 +189,8 @@ const saveValuesBtn=document.getElementById('saveValuesBtn'), resetValuesBtn=doc
 const servoTxt=document.getElementById('servoTxt'), tableTxt=document.getElementById('tableTxt'), xTxt=document.getElementById('xTxt'), vTxt=document.getElementById('vTxt'), d1Txt=document.getElementById('d1Txt'), d2Txt=document.getElementById('d2Txt');
 let state={x:-1,v:0,speed_valid:false,servo_angle:90,stabilization:true,kp:0,ki:0,kd:0,ref:150,d1:-1,d2:-1,servo_min:0,servo_max:180,servo_neutral:90};
 let sceneFrozen=false, plotRunning=false, continuousPlot=false, angleFrozen=false, posFrozen=false, speedFrozen=false, plotStart=0, angleData=[], posData=[], speedData=[], lastStab=true, editing=false, neutralTimer=null;
+let toastTimer=null;
+function notify(msg){if(!toast)return;toast.textContent=msg;toast.style.display='block';if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(()=>toast.style.display='none',2600)}
 function fit(c){const r=c.getBoundingClientRect(),d=window.devicePixelRatio||1;const w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));if(c.width!==w||c.height!==h){c.width=w;c.height=h}}
 function drawScene(){
 fit(scene);
@@ -269,7 +283,7 @@ continuousPlotBtn.onclick=()=>{continuousPlot=!continuousPlot;continuousPlotBtn.
 stabToggle.onclick=async()=>{const en=state.stabilization?0:1;await fetch(`/api/control?stabilization=${en}`,{cache:'no-store'});if(!en)manualSlider.value=state.servo_angle;fetchState()};
 manualSlider.oninput=()=>{servoTxt.textContent=manualSlider.value;tableTxt.textContent=(Number(manualSlider.value)/2).toFixed(1)};
 manualSlider.onchange=()=>{fetch(`/api/control?angle=${manualSlider.value}`,{cache:'no-store'}).then(fetchState)};
-[refInput,kpInput,kiInput,kdInput].forEach(el=>{el.onfocus=()=>editing=true;el.onblur=()=>editing=false;el.onchange=()=>{const q=`ref=${refInput.value}&kp=${kpInput.value}&ki=${kiInput.value}&kd=${kdInput.value}`;fetch(`/api/params?${q}`,{cache:'no-store'}).then(fetchState)}});
+[refInput,kpInput,kiInput,kdInput].forEach(el=>{el.onfocus=()=>editing=true;el.onblur=()=>editing=false;el.onchange=()=>{const q=`ref=${refInput.value}&kp=${kpInput.value}&ki=${kiInput.value}&kd=${kdInput.value}`;fetch(`/api/params?${q}`,{cache:'no-store'}).then(r=>{if(!r.ok)notify('Modification invalide.');fetchState()}).catch(()=>notify('Erreur reseau.'))}});
 settingsBtn.onclick=()=>settingsMenu.classList.toggle('open');
 calibrateBtn.onclick=()=>{location.href='/calibration_select'};
 calibrateServoBtn.onclick=()=>{location.href='/servo_calibration'};
@@ -370,9 +384,10 @@ static const char ADVANCED_HTML[] PROGMEM = R"rawliteral(
 <style>
 body{margin:0;min-height:100vh;background:#f4f1e8;color:#171717;font-family:Arial,Helvetica,sans-serif;padding:14px}
 .app{width:min(980px,100%);margin:0 auto;display:grid;gap:12px}.panel{background:#fffdf6;border:3px solid #202020;border-radius:4px;padding:16px}
-h1{font-size:28px;margin:0 0 10px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.form{display:grid;grid-template-columns:1fr 76px;gap:10px;align-items:center}
-label{font-weight:800}input{height:38px;border:3px solid #202020;background:white;font-size:18px;padding:4px 8px;width:100%}
+h1{font-size:28px;margin:0 0 10px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.form{display:grid;grid-template-columns:minmax(0,1fr) 5.5rem;gap:10px;align-items:center}
+label{font-weight:800;min-width:0}input{height:38px;border:3px solid #202020;background:white;font-size:18px;padding:4px 8px;width:5.5rem;max-width:100%;justify-self:end}
 button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:18px;font-weight:900;padding:10px 14px;cursor:pointer;text-decoration:none;text-align:center}.actions{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}.small{font-size:13px;color:#666}
+.toast{position:fixed;right:14px;bottom:14px;max-width:min(420px,calc(100vw - 28px));background:#171717;color:#fffdf6;border:3px solid #202020;padding:10px 14px;font-weight:800;z-index:20;display:none}
 @media(max-width:760px){.grid{grid-template-columns:1fr}.form{grid-template-columns:1fr}}
 </style>
 </head>
@@ -388,7 +403,7 @@ button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:18p
 <label>Max angle step / cycle [deg]</label><input id="maxStep" type="number" min="0" max="180" step="1">
 <label>Position precision [mm]</label><input id="posDb" type="number" min="0" max="50" step="1">
 <label>Speed precision [mm/s]</label><input id="speedDb" type="number" min="0" max="300" step="1">
-<label>Lost ball delay [ms]</label><input id="lostDelay" type="number" min="0" max="10000" step="100">
+<label>Lost ball delay [s]</label><input id="lostDelay" type="number" min="0" max="10" step="0.1">
 <label>Lost ball iter [cycles]</label><input id="lostIter" type="number" min="1" max="20" step="1">
 </div></section>
 <section class="panel"><h1>Servo</h1><div class="form">
@@ -410,17 +425,32 @@ button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:18p
 <a href="/">Back</a>
 </section>
 </div>
+<div class="toast" id="toast"></div>
 <script>
 const ids=['posWin','speedWin','maxStep','posDb','speedDb','lostDelay','lostIter','servoMin','servoMax','servoNeutral','tableLen','plotMax'];
 const el=Object.fromEntries(ids.map(id=>[id,document.getElementById(id)]));
 const statusEl=document.getElementById('status');
 const saveBtn=document.getElementById('saveBtn');
-function fill(s){el.posWin.value=s.position_window;el.speedWin.value=s.speed_window;el.maxStep.value=s.max_step;el.posDb.value=s.position_deadband;el.speedDb.value=s.speed_deadband;el.lostDelay.value=s.lost_delay;el.lostIter.value=s.lost_iter;el.servoMin.value=s.servo_min;el.servoMax.value=s.servo_max;el.servoNeutral.value=s.servo_neutral;el.tableLen.value=s.table_length;el.plotMax.value=s.plot_max_s}
+const toast=document.getElementById('toast');let toastTimer=null;
+function notify(msg){toast.textContent=msg;toast.style.display='block';if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(()=>toast.style.display='none',3000)}
+function fill(s){el.posWin.value=s.position_window;el.speedWin.value=s.speed_window;el.maxStep.value=s.max_step;el.posDb.value=s.position_deadband;el.speedDb.value=s.speed_deadband;el.lostDelay.value=(Number(s.lost_delay)/1000).toFixed(1);el.lostIter.value=s.lost_iter;el.servoMin.value=s.servo_min;el.servoMax.value=s.servo_max;el.servoNeutral.value=s.servo_neutral;el.tableLen.value=s.table_length;el.plotMax.value=s.plot_max_s}
 async function load(){try{const r=await fetch('/api/advanced',{cache:'no-store'});fill(await r.json())}catch(e){statusEl.textContent='Load failed.'}}
-function query(){return `pos_win=${el.posWin.value}&speed_win=${el.speedWin.value}&max_step=${el.maxStep.value}&pos_db=${el.posDb.value}&speed_db=${el.speedDb.value}&lost_delay=${el.lostDelay.value}&lost_iter=${el.lostIter.value}&servo_min=${el.servoMin.value}&servo_max=${el.servoMax.value}&servo_neutral=${el.servoNeutral.value}&table_len=${el.tableLen.value}&plot_max=${el.plotMax.value}`}
-document.getElementById('applyBtn').onclick=async()=>{statusEl.textContent='Applying...';try{const r=await fetch('/api/advanced/set?'+query(),{cache:'no-store'});const s=await r.json();fill(s);statusEl.textContent=s.ok?'Applied.':'Some values were rejected.'}catch(e){statusEl.textContent='Apply failed.'}};
+function query(){return `pos_win=${el.posWin.value}&speed_win=${el.speedWin.value}&max_step=${el.maxStep.value}&pos_db=${el.posDb.value}&speed_db=${el.speedDb.value}&lost_delay=${Math.round(Number(el.lostDelay.value)*1000)}&lost_iter=${el.lostIter.value}&servo_min=${el.servoMin.value}&servo_max=${el.servoMax.value}&servo_neutral=${el.servoNeutral.value}&table_len=${el.tableLen.value}&plot_max=${el.plotMax.value}`}
+function num(id){return Number(el[id].value)}
+function inRange(v,min,max){return Number.isFinite(v)&&v>=min&&v<=max}
+function validateAdvanced(){
+  const sm=num('servoMin'),sx=num('servoMax'),sn=num('servoNeutral');
+  if(!inRange(num('posWin'),1,20)||!inRange(num('speedWin'),1,20))return 'Les fenetres de moyenne doivent etre entre 1 et 20.';
+  if(!inRange(num('maxStep'),0,180)||!inRange(num('posDb'),0,50)||!inRange(num('speedDb'),0,300))return 'Parametre PID hors limites.';
+  if(!inRange(num('lostDelay'),0,10)||!inRange(num('lostIter'),1,20))return 'Parametre de balle perdue hors limites.';
+  if(!inRange(sm,0,180)||!inRange(sx,0,180)||sm>=sx||sn<sm||sn>sx)return 'Angles servo invalides: min < max et neutre dans la plage 0-180 deg.';
+  if(!inRange(num('tableLen'),1,300))return 'La longueur de table doit etre entre 1 et 300 mm.';
+  if(!inRange(num('plotMax'),10,50))return 'Le temps de plot doit etre entre 10 et 50 s.';
+  return '';
+}
+document.getElementById('applyBtn').onclick=async()=>{const err=validateAdvanced();if(err){notify(err);return}statusEl.textContent='Applying...';try{const r=await fetch('/api/advanced/set?'+query(),{cache:'no-store'});const s=await r.json();fill(s);statusEl.textContent=s.ok?'Applied.':'Some values were rejected.';if(!s.ok)notify('Modification invalide: verifiez les bornes des parametres.')}catch(e){statusEl.textContent='Apply failed.';notify('Erreur reseau.')}};
 document.getElementById('resetBtn').onclick=async()=>{statusEl.textContent='Resetting...';try{const r=await fetch('/api/advanced/reset',{cache:'no-store'});fill(await r.json());statusEl.textContent='Defaults restored.'}catch(e){statusEl.textContent='Reset failed.'}};
-saveBtn.onclick=async()=>{statusEl.textContent='Saving...';saveBtn.disabled=true;try{const r=await fetch('/api/advanced/save?'+query(),{cache:'no-store'});const s=await r.json();fill(s);statusEl.textContent=s.ok?'Saved.':'Some values were rejected.'}catch(e){statusEl.textContent='Save failed.'}setTimeout(()=>{saveBtn.disabled=false},2000)};
+saveBtn.onclick=async()=>{const err=validateAdvanced();if(err){notify(err);return}statusEl.textContent='Saving...';saveBtn.disabled=true;try{const r=await fetch('/api/advanced/save?'+query(),{cache:'no-store'});const s=await r.json();fill(s);statusEl.textContent=s.ok?'Saved.':'Some values were rejected.';if(!s.ok)notify('Sauvegarde refusee: une valeur est invalide.')}catch(e){statusEl.textContent='Save failed.';notify('Erreur reseau.')}setTimeout(()=>{saveBtn.disabled=false},2000)};
 load();
 </script>
 </body>
@@ -441,6 +471,7 @@ body{margin:0;min-height:100vh;background:#f4f1e8;color:#171717;font-family:Aria
 .form{display:grid;grid-template-columns:1fr 160px;gap:10px;align-items:center}label{font-weight:800}input{height:42px;border:3px solid #202020;background:white;font-size:20px;padding:4px 8px;width:100%}
 .row{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}.small{font-size:14px;color:#666}
 button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:20px;font-weight:900;padding:10px 18px;cursor:pointer;text-decoration:none;text-align:center}button:disabled{opacity:.55;cursor:wait}
+.toast{position:fixed;right:14px;bottom:14px;max-width:min(420px,calc(100vw - 28px));background:#171717;color:#fffdf6;border:3px solid #202020;padding:10px 14px;font-weight:800;z-index:20;display:none}
 @media(max-width:620px){.form{grid-template-columns:1fr}.scene{height:260px}}
 </style>
 </head>
@@ -463,10 +494,13 @@ button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:20p
 <p class="small" id="status">Chargement...</p>
 </section>
 </div>
+<div class="toast" id="toast"></div>
 <script>
 const scene=document.getElementById('scene'),minInput=document.getElementById('minInput'),maxInput=document.getElementById('maxInput'),neutralTxt=document.getElementById('neutralTxt'),servoTxt=document.getElementById('servoTxt'),statusEl=document.getElementById('status');
 const animateBtn=document.getElementById('animateBtn'),saveBtn=document.getElementById('saveBtn'),cancelBtn=document.getElementById('cancelBtn');
+const toast=document.getElementById('toast');let toastTimer=null;
 const params=new URLSearchParams(location.search);let st={min_angle:0,max_angle:180,neutral_angle:90,current_angle:90};let started=false,animating=false;
+function notify(msg){toast.textContent=msg;toast.style.display='block';if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(()=>toast.style.display='none',3000)}
 function fit(c){const r=c.getBoundingClientRect(),d=window.devicePixelRatio||1;const w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));if(c.width!==w||c.height!==h){c.width=w;c.height=h}}
 function neutralFromInputs(){const mn=Number(minInput.value||0),mx=Number(maxInput.value||180);return Math.round((mn+mx)/2)}
 function displayAngle(){return Number(st.current_angle||neutralFromInputs())/2}
@@ -486,14 +520,16 @@ async function animateSegment(from,to,duration=900){const t0=performance.now(),p
 animateBtn.onclick=async()=>{
  if(animating)return;animating=true;animateBtn.disabled=saveBtn.disabled=true;statusEl.textContent='Animation...';
  const mn=Number(minInput.value||0),mx=Number(maxInput.value||180),neu=neutralFromInputs();
- await fetch(`/api/servo_calibration/action?cmd=preview&min=${mn}&max=${mx}`,{cache:'no-store'});
+ const pr=await fetch(`/api/servo_calibration/action?cmd=preview&min=${mn}&max=${mx}`,{cache:'no-store'});
+ const ps=await pr.json();
+ if(!ps.ok){statusEl.textContent=ps.error||'Valeurs invalides.';notify(ps.error||'Valeurs servo invalides.');animateBtn.disabled=saveBtn.disabled=false;animating=false;return}
  await animateSegment(st.current_angle,neu,600);await animateSegment(neu,mx,900);await animateSegment(mx,mn,1200);await animateSegment(mn,neu,900);
  statusEl.textContent='Animation terminee.';animateBtn.disabled=saveBtn.disabled=false;animating=false;
 };
 saveBtn.onclick=async()=>{
  saveBtn.disabled=true;statusEl.textContent='Validation...';
  const mn=Number(minInput.value||0),mx=Number(maxInput.value||180);
- try{const r=await fetch(`/api/servo_calibration/action?cmd=save&min=${mn}&max=${mx}`,{cache:'no-store'});st=await r.json();syncInputs();if(st.ok){statusEl.textContent='Servo valide.';setTimeout(()=>{location.href=params.get('initial')==='1'?'/calibration?after_servo=1':'/'},500)}else{statusEl.textContent=st.error||'Valeurs invalides.'}}catch(e){statusEl.textContent='Erreur validation.'}
+ try{const r=await fetch(`/api/servo_calibration/action?cmd=save&min=${mn}&max=${mx}`,{cache:'no-store'});st=await r.json();syncInputs();if(st.ok){statusEl.textContent='Servo valide.';setTimeout(()=>{location.href=params.get('initial')==='1'?'/calibration?after_servo=1':'/'},500)}else{statusEl.textContent=st.error||'Valeurs invalides.';notify(st.error||'Valeurs servo invalides.')}}catch(e){statusEl.textContent='Erreur validation.';notify('Erreur reseau.')}
  saveBtn.disabled=false;
 };
 [minInput,maxInput].forEach(i=>i.oninput=()=>{neutralTxt.textContent=neutralFromInputs()});
@@ -518,6 +554,7 @@ h1{font-size:25px;line-height:1.2;margin:0 0 10px}.msg{font-size:18px;line-heigh
 .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.dot{width:18px;height:18px;border-radius:50%;background:#b91c1c;border:2px solid #202020}.ok{background:#1f8f45}.bad{background:#b91c1c}
 button{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:20px;font-weight:900;padding:10px 18px;cursor:pointer}button:disabled{opacity:.55;cursor:wait}
 input{height:42px;border:3px solid #202020;background:white;font-size:20px;padding:4px 8px;width:160px}.hint{font-size:14px;color:#666}.hidden{display:none}.err{color:#b91c1c;font-weight:800}
+.toast{position:fixed;right:14px;bottom:14px;max-width:min(420px,calc(100vw - 28px));background:#171717;color:#fffdf6;border:3px solid #202020;padding:10px 14px;font-weight:800;z-index:20;display:none}
 </style>
 </head>
 <body>
@@ -538,17 +575,21 @@ input{height:42px;border:3px solid #202020;background:white;font-size:20px;paddi
 <div class="hint" id="status">Les valeurs sont sauvegardees apres validation finale.</div>
 </section>
 </div>
+<div class="toast" id="toast"></div>
 <script>
-const TABLE_LEN_MM=290, REFRESH_MS=80;
+let TABLE_LEN_MM=290; const REFRESH_MS=80;
 const scene=document.getElementById('calScene'),dot=document.getElementById('dot'),rawTxt=document.getElementById('rawTxt'),tofTxt=document.getElementById('tofTxt'),rawRow=document.getElementById('rawRow');
 const title=document.getElementById('title'),instruction=document.getElementById('instruction'),statusEl=document.getElementById('status');
 const realRow=document.getElementById('realRow'),realInput=document.getElementById('realInput');
 const doneBtn=document.getElementById('doneBtn'),submitBtn=document.getElementById('submitBtn'),acceptBtn=document.getElementById('acceptBtn'),restartBtn=document.getElementById('restartBtn'),cancelBtn=document.getElementById('cancelBtn');
+const toast=document.getElementById('toast');let toastTimer=null;
 let s={};
 const params=new URLSearchParams(location.search);
 let startupDone=false;
 let realInputEditing=false;
 let lastInputStep='';
+let lastError='';
+function notify(msg){toast.textContent=msg;toast.style.display='block';if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(()=>toast.style.display='none',3000)}
 function fit(c){const r=c.getBoundingClientRect(),d=window.devicePixelRatio||1;const w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));if(c.width!==w||c.height!==h){c.width=w;c.height=h}}
 function drawScene(){
 fit(scene);const c=scene.getContext('2d'),w=scene.width,h=scene.height;c.clearRect(0,0,w,h);c.lineWidth=4;c.strokeStyle='#171717';c.fillStyle='#171717';
@@ -558,6 +599,14 @@ let pos=s.visual_pos_mm; if(!Number.isFinite(pos)||pos<0)pos=TABLE_LEN_MM/2; pos
 const r=Math.max(15,Math.min(w,h)*.045),contactX=x1+(x2-x1)*p,contactY=y1+(y2-y1)*p,bx=contactX+nx*r,by=contactY+ny*r;
 c.beginPath();c.arc(bx,by,r,0,Math.PI*2);c.stroke();c.beginPath();c.moveTo(bx-r*.65,by-r*.65);c.lineTo(bx+r*.65,by+r*.65);c.moveTo(bx+r*.65,by-r*.65);c.lineTo(bx-r*.65,by+r*.65);c.stroke();
 if(s.step==='verify'){[0,72,145,218,290].forEach(mm=>{const x=x1+(x2-x1)*(mm/TABLE_LEN_MM);c.strokeStyle='#208444';c.fillStyle='#208444';c.lineWidth=3;c.beginPath();c.moveTo(x,cy+30);c.lineTo(x,cy+70);c.stroke();c.beginPath();c.moveTo(x,cy+24);c.lineTo(x-8,cy+42);c.lineTo(x+8,cy+42);c.closePath();c.fill();c.fillText(`${mm}`,x-10,cy+90)});c.strokeStyle='#171717';c.fillStyle='#171717'}
+if(s.step!=='verify'&&s.tof){
+  const tx=s.tof===1?x2:x1,dir=s.tof===1?-1:1,ay=cy-76;
+  c.strokeStyle='#2457b8';c.fillStyle='#2457b8';c.lineWidth=5;
+  c.beginPath();c.moveTo(tx+dir*70,ay);c.lineTo(tx+dir*14,ay);c.stroke();
+  c.beginPath();c.moveTo(tx+dir*8,ay);c.lineTo(tx+dir*24,ay-10);c.lineTo(tx+dir*24,ay+10);c.closePath();c.fill();
+  c.font=`${Math.max(13,w*.017)}px Arial`;c.fillText(`TOF ${s.tof}`,tx+dir*42-22,ay-16);
+  c.strokeStyle='#171717';c.fillStyle='#171717';
+}
 c.font=`${Math.max(14,w*.018)}px Arial`;c.fillText(`visual pos=${Math.round(pos)} mm`,18,h-22);
 }
 function setButtons(){
@@ -588,12 +637,15 @@ if(s.needs_real_input && !realInputEditing && (s.step!==lastInputStep || !realIn
 lastInputStep=s.step||'';
 }
 function update(){
+TABLE_LEN_MM=s.table_length||290;
 title.textContent=s.title||'Calibration';
 instruction.textContent=s.instruction||'';
 rawTxt.textContent=s.raw_valid?`raw=${s.raw_mm} mm`:'raw invalid';
 tofTxt.textContent=s.tof?`TOF ${s.tof}`:'';
 dot.className='dot '+(s.raw_valid?'ok':'bad');
 if(s.error)statusEl.innerHTML=`<span class="err">${s.error}</span>`;else statusEl.textContent=s.status||'';
+if(s.error&&s.error!==lastError)notify(s.error);
+lastError=s.error||'';
 setButtons();drawScene();
 }
 async function ensureStarted(){
@@ -605,7 +657,7 @@ else if(params.get('target')==='1')await fetch('/api/calibration/action?cmd=star
 else if(params.get('target')==='2')await fetch('/api/calibration/action?cmd=start&target=2',{cache:'no-store'});
 }
 async function getState(){try{await ensureStarted();const r=await fetch('/api/calibration/state',{cache:'no-store'});s=await r.json();update()}catch(e){statusEl.textContent='Erreur reseau'}}
-async function action(q){doneBtn.disabled=submitBtn.disabled=acceptBtn.disabled=restartBtn.disabled=cancelBtn.disabled=true;try{const r=await fetch('/api/calibration/action?'+q,{cache:'no-store'});s=await r.json();update();if(s.done)setTimeout(()=>{location.href='/'},600)}catch(e){statusEl.textContent='Erreur action'}doneBtn.disabled=submitBtn.disabled=acceptBtn.disabled=restartBtn.disabled=cancelBtn.disabled=false}
+async function action(q){doneBtn.disabled=submitBtn.disabled=acceptBtn.disabled=restartBtn.disabled=cancelBtn.disabled=true;try{const r=await fetch('/api/calibration/action?'+q,{cache:'no-store'});s=await r.json();update();if(s.done)setTimeout(()=>{location.href='/'},600)}catch(e){statusEl.textContent='Erreur action';notify('Erreur reseau.')}doneBtn.disabled=submitBtn.disabled=acceptBtn.disabled=restartBtn.disabled=cancelBtn.disabled=false}
 realInput.onfocus=()=>{realInputEditing=true};
 realInput.onblur=()=>{realInputEditing=false};
 doneBtn.onclick=()=>{if(params.get('verify')==='1')location.href='/calibration_select';else action('cmd=done')};
@@ -1252,6 +1304,59 @@ static bool load_advanced_settings(void) {
   return ok;
 }
 
+static void step_servo_to_neutral(void) {
+  static const int RETURN_STEP_DEG = 2;
+
+  int current = get_controller_last_angle_deg();
+  int target = get_servo_neutral_angle_deg();
+
+  if (abs(current - target) <= RETURN_STEP_DEG) {
+    set_controller_manual_angle(target);
+    neutral_return_pending = false;
+    return;
+  }
+
+  int next_angle = current + ((target > current) ? RETURN_STEP_DEG : -RETURN_STEP_DEG);
+  set_controller_manual_angle(next_angle);
+}
+
+static void update_web_client_control_mode(void) {
+  if (!distance_sensors_calibrated) {
+    return;
+  }
+
+  uint32_t now = millis();
+  bool has_client = WiFi.softAPgetStationNum() > 0;
+
+  if (!client_mode_initialized || has_client != web_client_present) {
+    client_mode_initialized = true;
+    web_client_present = has_client;
+
+    if (has_client) {
+      auto_stabilization_without_client = false;
+      neutral_return_pending = true;
+      set_controller_enabled(false);
+    } else {
+      neutral_return_pending = false;
+      load_controller_settings();
+      set_controller_enabled(true);
+      auto_stabilization_without_client = true;
+    }
+  }
+
+  if (!has_client && !controller_is_enabled()) {
+    load_controller_settings();
+    set_controller_enabled(true);
+    auto_stabilization_without_client = true;
+  }
+
+  if (has_client && neutral_return_pending && !controller_is_enabled() &&
+      now - last_client_mode_update_ms >= 50) {
+    last_client_mode_update_ms = now;
+    step_servo_to_neutral();
+  }
+}
+
 static void send_servo_calibration_state(bool ok = true) {
   String json = "{";
   json += "\"ok\":" + String(ok ? "true" : "false") + ",";
@@ -1441,6 +1546,7 @@ static void send_calibration_state(void) {
   json += "\"needs_done\":" + String(needs_done ? "true" : "false") + ",";
   json += "\"needs_real_input\":" + String(needs_real_input ? "true" : "false") + ",";
   json += "\"real_fov\":" + String(real_fov) + ",";
+  json += "\"table_length\":" + String(get_table_length_mm()) + ",";
   json += "\"status\":\"\",";
   json += "\"error\":\"" + calibration_error_msg + "\",";
   json += "\"done\":" + String(calibration_flow_done ? "true" : "false");
@@ -1686,10 +1792,12 @@ static void setup_routes(void) {
     }
 
     if (server.hasArg("stabilization")) {
+      neutral_return_pending = false;
       set_controller_enabled(server.arg("stabilization").toInt() != 0);
     }
 
     if (server.hasArg("angle")) {
+      neutral_return_pending = false;
       set_controller_manual_angle(server.arg("angle").toInt());
     }
 
@@ -1759,6 +1867,7 @@ static void web_task(void *pv) {
 
   for (;;) {
     server.handleClient();
+    update_web_client_control_mode();
     vTaskDelay(pdMS_TO_TICKS(WEB_TASK_DELAY_MS));
   }
 }
