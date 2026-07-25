@@ -126,6 +126,7 @@ static void read_one_tof(Adafruit_VL53L0X &sensor,
                          void (*store_measurement)(int16_t)) {
   uint16_t range_mm = sensor.readRangeResult();
   if (sensor.readRangeStatus() != 0 || range_mm == 0 || range_mm > INT16_MAX) {
+    store_measurement(-1);
     return;
   }
 
@@ -159,7 +160,12 @@ static void tof_task(void *pv) {
         }
         measure_start_ms = now;
         measure_ready = false;
-        state = tof_1.startRange() ? WAIT_TOF_1 : START_TOF_2;
+        if (tof_1.startRange()) {
+          state = WAIT_TOF_1;
+        } else {
+          set_tof_1_measurement(-1);
+          state = START_TOF_2;
+        }
         break;
 
       case WAIT_TOF_1:
@@ -173,6 +179,7 @@ static void tof_task(void *pv) {
         if (measure_ready) {
           read_one_tof(tof_1, set_tof_1_measurement);
         } else {
+          set_tof_1_measurement(-1);
           tof_1.stopMeasurement();
         }
         state = START_TOF_2;
@@ -185,7 +192,12 @@ static void tof_task(void *pv) {
         }
         measure_start_ms = now;
         measure_ready = false;
-        state = tof_2.startRange() ? WAIT_TOF_2 : START_TOF_1;
+        if (tof_2.startRange()) {
+          state = WAIT_TOF_2;
+        } else {
+          set_tof_2_measurement(-1);
+          state = START_TOF_1;
+        }
         break;
 
       case WAIT_TOF_2:
@@ -199,6 +211,7 @@ static void tof_task(void *pv) {
         if (measure_ready) {
           read_one_tof(tof_2, set_tof_2_measurement);
         } else {
+          set_tof_2_measurement(-1);
           tof_2.stopMeasurement();
         }
         state = START_TOF_1;

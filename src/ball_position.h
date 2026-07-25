@@ -16,7 +16,7 @@ github: jess-lnga
 #define SPEED_FILTER_DEFAULT_WINDOW 3
 #define FILTER_MIN_WINDOW 1
 #define FILTER_MAX_WINDOW 20
-#define TABLE_LENGTH_DEFAULT_MM 290
+#define TABLE_LENGTH_DEFAULT_MM 270
 
 void update_tof_distances();
 bool compute_ball_position();

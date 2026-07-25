@@ -77,7 +77,9 @@ static int ball_speed_mm_per_s = 0;
 static float ball_speed_filtered_mm_per_s = 0.0f;
 
 // ------ WATCHDOG AND TIMEOUTS ------
-static const uint32_t TOF_TIMEOUT_MS = 300;
+static const uint32_t TOF_TIMEOUT_MS = 120;
+static const int FOV_BLEND_MARGIN_MM = 30;
+static const float FOV_EDGE_MIN_WEIGHT = 0.10f;
 
 static uint32_t last_valid_d1_ms = 0;
 static uint32_t last_valid_d2_ms = 0;
@@ -104,6 +106,20 @@ static void reset_position_filter_buffers() {
     count_d1 = 0;
     count_d2 = 0;
     d1 = 0;
+    d2 = 0;
+}
+
+static void reset_d1_filter_buffer() {
+    memset(mv_avg_d1, 0, sizeof(mv_avg_d1));
+    index_mv_avg1 = 0;
+    count_d1 = 0;
+    d1 = 0;
+}
+
+static void reset_d2_filter_buffer() {
+    memset(mv_avg_d2, 0, sizeof(mv_avg_d2));
+    index_mv_avg2 = 0;
+    count_d2 = 0;
     d2 = 0;
 }
 
@@ -241,6 +257,18 @@ bool set_tof_calibration(int tof_number, int fov, int real_distance_at_fov,
     return calibration_valid;
 }
 
+static float tof_fov_weight(int corrected_distance_mm, int real_distance_at_fov_mm) {
+    if(corrected_distance_mm < 0) return 0.0f;
+    if(real_distance_at_fov_mm <= 0) return 1.0f;
+
+    int margin_to_fov_mm = real_distance_at_fov_mm - corrected_distance_mm;
+    if(margin_to_fov_mm >= FOV_BLEND_MARGIN_MM) return 1.0f;
+    if(margin_to_fov_mm <= 0) return FOV_EDGE_MIN_WEIGHT;
+
+    float normalized_margin = (float)margin_to_fov_mm / (float)FOV_BLEND_MARGIN_MM;
+    return FOV_EDGE_MIN_WEIGHT + normalized_margin * (1.0f - FOV_EDGE_MIN_WEIGHT);
+}
+
 
 
 void update_tof_distances(){
@@ -249,37 +277,47 @@ void update_tof_distances(){
     uint32_t tof_1_update_ms = get_tof_1_last_update_ms();
     uint32_t tof_2_update_ms = get_tof_2_last_update_ms();
 
-    if(staff_d1 >= 0 &&
-       tof_1_update_ms != 0 &&
-       tof_1_update_ms != last_processed_d1_ms){
-        mv_avg_d1[index_mv_avg1] = staff_d1;
-        index_mv_avg1 = (index_mv_avg1 + 1) % position_filter_window;
-        if (count_d1 < position_filter_window) count_d1++;
-
+    if(tof_1_update_ms != 0 && tof_1_update_ms != last_processed_d1_ms){
         last_processed_d1_ms = tof_1_update_ms;
-        last_valid_d1_ms = tof_1_update_ms;
-        d1_valid = true;
+
+        if(staff_d1 >= 0){
+            mv_avg_d1[index_mv_avg1] = staff_d1;
+            index_mv_avg1 = (index_mv_avg1 + 1) % position_filter_window;
+            if (count_d1 < position_filter_window) count_d1++;
+
+            last_valid_d1_ms = tof_1_update_ms;
+            d1_valid = true;
+        } else {
+            reset_d1_filter_buffer();
+            d1_valid = false;
+        }
     }
 
-    if(staff_d2 >= 0 &&
-       tof_2_update_ms != 0 &&
-       tof_2_update_ms != last_processed_d2_ms){
-        mv_avg_d2[index_mv_avg2] = staff_d2;
-        index_mv_avg2 = (index_mv_avg2 + 1) % position_filter_window;
-        if (count_d2 < position_filter_window) count_d2++;
-
+    if(tof_2_update_ms != 0 && tof_2_update_ms != last_processed_d2_ms){
         last_processed_d2_ms = tof_2_update_ms;
-        last_valid_d2_ms = tof_2_update_ms;
-        d2_valid = true;
+
+        if(staff_d2 >= 0){
+            mv_avg_d2[index_mv_avg2] = staff_d2;
+            index_mv_avg2 = (index_mv_avg2 + 1) % position_filter_window;
+            if (count_d2 < position_filter_window) count_d2++;
+
+            last_valid_d2_ms = tof_2_update_ms;
+            d2_valid = true;
+        } else {
+            reset_d2_filter_buffer();
+            d2_valid = false;
+        }
     }
 
     uint32_t now = millis();
 
-    if (now - last_valid_d1_ms > TOF_TIMEOUT_MS) {
+    if (d1_valid && now - last_valid_d1_ms > TOF_TIMEOUT_MS) {
+        reset_d1_filter_buffer();
         d1_valid = false;
     }
 
-    if (now - last_valid_d2_ms > TOF_TIMEOUT_MS) {
+    if (d2_valid && now - last_valid_d2_ms > TOF_TIMEOUT_MS) {
+        reset_d2_filter_buffer();
         d2_valid = false;
     }
 
@@ -352,62 +390,48 @@ bool compute_ball_speed(){
 bool compute_ball_position(){
     int d1_corr = 0;
     int d2_corr = 0;
+    int x_from_tof1 = 0;
+    int x_from_tof2 = 0;
+    float tof1_weight = 0.0f;
+    float tof2_weight = 0.0f;
     bool position_valid = false;
 
-    if(d1_valid && d2_valid){
-        //d1_corr = d1 + tof1_offset_mm;
-        //d2_corr = d2 + tof2_offset_mm;
+    if(d1_valid){
         d1_corr = linearise_tof_measure(TOF1, d1);
-        d2_corr = linearise_tof_measure(TOF2, d2);
-
-        if((d1_corr >= 0)&&(d2_corr >= 0)){
-            if((d1_corr < MIN_ACCEPTABLE_TOF_VALUE_MM) && (d2_corr < MIN_ACCEPTABLE_TOF_VALUE_MM)){
-                ball_position_mm = -1;
-            
-            } else{
-                position_valid = true;
-                ball_position_mm = (table_length_mm - d1_corr + d2_corr) / 2;
-            }
-
-        }else if((d1_corr >= 0)&&(d2_corr < 0)){
-            ball_position_mm = table_length_mm - d1_corr;
-            position_valid = true;
-
-        }else if((d1_corr < 0)&&(d2_corr >= 0)){
-            ball_position_mm = d2_corr;
-            position_valid = true;
-
-        }else{
-            ball_position_mm = -1;
-        }
-
-    }else if(d1_valid){
-
-        //d1_corr = d1 + tof1_offset_mm;
-        d1_corr = linearise_tof_measure(TOF1, d1);
-
         if(d1_corr >= 0){
-            ball_position_mm = table_length_mm - d1_corr;
-            position_valid = true;
-            
-        }else{
-            ball_position_mm = -1;
-            
+            x_from_tof1 = clamp_int_local(table_length_mm - d1_corr, 0, table_length_mm);
+            tof1_weight = tof_fov_weight(d1_corr, REAL_DISTANCE_AT_FOV1);
         }
-    }else if(d2_valid){
+    } else {
+        d1_corr = -1;
+    }
 
-        //d2_corr = d2 + tof2_offset_mm;
+    if(d2_valid){
         d2_corr = linearise_tof_measure(TOF2, d2);
-
         if(d2_corr >= 0){
-            ball_position_mm = d2_corr;
+            x_from_tof2 = clamp_int_local(d2_corr, 0, table_length_mm);
+            tof2_weight = tof_fov_weight(d2_corr, REAL_DISTANCE_AT_FOV2);
+        }
+    } else {
+        d2_corr = -1;
+    }
+
+    if((d1_corr >= 0) && (d2_corr >= 0) &&
+       (d1_corr < MIN_ACCEPTABLE_TOF_VALUE_MM) &&
+       (d2_corr < MIN_ACCEPTABLE_TOF_VALUE_MM)){
+        ball_position_mm = -1;
+    } else {
+        float total_weight = tof1_weight + tof2_weight;
+
+        if(total_weight > 0.0f){
+            float fused_position = ((tof1_weight * (float)x_from_tof1) +
+                                    (tof2_weight * (float)x_from_tof2)) /
+                                   total_weight;
+            ball_position_mm = clamp_int_local((int)lroundf(fused_position), 0, table_length_mm);
             position_valid = true;
-        }else{
+        } else {
             ball_position_mm = -1;
         }
-
-    }else{
-        ball_position_mm = -1;
     }
 
     compute_ball_speed();
