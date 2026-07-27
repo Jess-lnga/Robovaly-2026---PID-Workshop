@@ -21,6 +21,8 @@ static int position_deadband_mm = CONTROLLER_DEFAULT_POSITION_DEADBAND_MM;
 static int speed_deadband_mm_s = CONTROLLER_DEFAULT_SPEED_DEADBAND_MM_S;
 static uint32_t lost_ball_delay_ms = CONTROLLER_DEFAULT_LOST_BALL_DELAY_MS;
 static int lost_ball_iter = CONTROLLER_DEFAULT_LOST_BALL_ITER;
+static int max_control_speed_mm_s = CONTROLLER_DEFAULT_MAX_CONTROL_SPEED_MM_S;
+static uint32_t controller_period_ms = CONTROLLER_DEFAULT_PERIOD_MS;
 
 static float kp = 0.15f;
 static float ki = 0.1f;
@@ -174,6 +176,7 @@ bool update_controller(void) {
 
     int position_mm = get_ball_position();
     int speed_mm_s = speed_valid ? get_ball_speed() : 0;
+    speed_mm_s = clamp_int(speed_mm_s, -max_control_speed_mm_s, max_control_speed_mm_s);
 
     float error_mm = (float)reference_mm - (float)position_mm;
     bool stable_in_deadband = speed_valid &&
@@ -318,11 +321,40 @@ int get_controller_lost_ball_iter(void) {
     return lost_ball_iter;
 }
 
+bool set_controller_max_control_speed_mm_s(int max_speed_mm_s) {
+    if(max_speed_mm_s < 0 || max_speed_mm_s > 2000) {
+        return false;
+    }
+
+    max_control_speed_mm_s = max_speed_mm_s;
+    return true;
+}
+
+int get_controller_max_control_speed_mm_s(void) {
+    return max_control_speed_mm_s;
+}
+
+bool set_controller_period_ms(uint32_t period_ms) {
+    if(period_ms < 10 || period_ms > 100) {
+        return false;
+    }
+
+    controller_period_ms = period_ms;
+    reset_controller();
+    return true;
+}
+
+uint32_t get_controller_period_ms(void) {
+    return controller_period_ms;
+}
+
 void reset_controller_advanced_parameters(void) {
     servo_max_step_deg = CONTROLLER_DEFAULT_MAX_STEP_DEG;
     position_deadband_mm = CONTROLLER_DEFAULT_POSITION_DEADBAND_MM;
     speed_deadband_mm_s = CONTROLLER_DEFAULT_SPEED_DEADBAND_MM_S;
     lost_ball_delay_ms = CONTROLLER_DEFAULT_LOST_BALL_DELAY_MS;
     lost_ball_iter = CONTROLLER_DEFAULT_LOST_BALL_ITER;
+    max_control_speed_mm_s = CONTROLLER_DEFAULT_MAX_CONTROL_SPEED_MM_S;
+    controller_period_ms = CONTROLLER_DEFAULT_PERIOD_MS;
     reset_controller();
 }

@@ -11,7 +11,6 @@ github: jess-lnga
 #include "interface_web.h"
 
 static const uint32_t SERIAL_BAUDRATE = 115200;
-static const uint32_t CONTROLLER_PERIOD_MS = 50;
 static const BaseType_t CONTROLLER_TASK_CORE = 1;
 
 static TaskHandle_t controller_task_handle = nullptr;
@@ -23,7 +22,7 @@ static void controller_task(void *pv) {
 
   for (;;) {
     update_controller();
-    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(CONTROLLER_PERIOD_MS));
+    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(get_controller_period_ms()));
   }
 }
 

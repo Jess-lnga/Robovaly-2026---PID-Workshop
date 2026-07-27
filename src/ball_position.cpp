@@ -48,38 +48,44 @@ static bool fov2_greater_than_072_mm = false;
 static bool fov2_greater_than_000_mm = false;
 
 
-// ------ MOVING AVERAGES ------
-static int position_filter_window = POSITION_FILTER_DEFAULT_WINDOW;
-static int speed_filter_window = SPEED_FILTER_DEFAULT_WINDOW;
-static int mv_avg_d1[FILTER_MAX_WINDOW] = {0};
-static int mv_avg_d2[FILTER_MAX_WINDOW] = {0};
-static int mv_avg_speed[FILTER_MAX_WINDOW] = {0};
-
-static int index_mv_avg1 = 0;
-static int index_mv_avg2 = 0;
-static int index_mv_avg_speed = 0;
-
 static int d1 = 0;
 static int d2 = 0;
 
-static int count_d1 = 0;
-static int count_d2 = 0;
-static int count_speed = 0;
-
 // ------ BALL POSITION - SPEED - TIMESTAMPS ------
 static int ball_position_mm = 0;
-static int ball_position_prev_mm = 0;
+static float ball_position_estimate_mm = 0.0f;
+static float ball_speed_estimate_mm_s = 0.0f;
 
 static uint32_t last_ball_position_update_ms = 0;
 static bool ball_position_prev_valid = false;
 
 static int ball_speed_mm_per_s = 0;
-static float ball_speed_filtered_mm_per_s = 0.0f;
 
 // ------ WATCHDOG AND TIMEOUTS ------
 static const uint32_t TOF_TIMEOUT_MS = 120;
 static const int FOV_BLEND_MARGIN_MM = 30;
 static const float FOV_EDGE_MIN_WEIGHT = 0.10f;
+static const uint32_t SPEED_ESTIMATOR_RESET_DT_MS = 250;
+static float alpha_beta_min_alpha = ALPHA_BETA_DEFAULT_MIN_ALPHA;
+static float alpha_beta_max_alpha = ALPHA_BETA_DEFAULT_MAX_ALPHA;
+static float alpha_beta_min_beta = ALPHA_BETA_DEFAULT_MIN_BETA;
+static float alpha_beta_max_beta = ALPHA_BETA_DEFAULT_MAX_BETA;
+
+static int noise_profile_positions_mm[NOISE_PROFILE_POINT_COUNT] = {0, 72, 145, 218, 290};
+static int position_noise_deadband_mm[NOISE_PROFILE_POINT_COUNT] = {
+    DEFAULT_POSITION_NOISE_DEADBAND_MM,
+    DEFAULT_POSITION_NOISE_DEADBAND_MM,
+    DEFAULT_POSITION_NOISE_DEADBAND_MM,
+    DEFAULT_POSITION_NOISE_DEADBAND_MM,
+    DEFAULT_POSITION_NOISE_DEADBAND_MM
+};
+static int speed_noise_deadband_mm_s[NOISE_PROFILE_POINT_COUNT] = {
+    DEFAULT_SPEED_NOISE_DEADBAND_MM_S,
+    DEFAULT_SPEED_NOISE_DEADBAND_MM_S,
+    DEFAULT_SPEED_NOISE_DEADBAND_MM_S,
+    DEFAULT_SPEED_NOISE_DEADBAND_MM_S,
+    DEFAULT_SPEED_NOISE_DEADBAND_MM_S
+};
 
 static uint32_t last_valid_d1_ms = 0;
 static uint32_t last_valid_d2_ms = 0;
@@ -98,38 +104,47 @@ static int clamp_int_local(int value, int min_value, int max_value) {
     return value;
 }
 
-static void reset_position_filter_buffers() {
-    memset(mv_avg_d1, 0, sizeof(mv_avg_d1));
-    memset(mv_avg_d2, 0, sizeof(mv_avg_d2));
-    index_mv_avg1 = 0;
-    index_mv_avg2 = 0;
-    count_d1 = 0;
-    count_d2 = 0;
-    d1 = 0;
-    d2 = 0;
+static float clamp_float_local(float value, float min_value, float max_value) {
+    if(value < min_value) return min_value;
+    if(value > max_value) return max_value;
+    return value;
 }
 
 static void reset_d1_filter_buffer() {
-    memset(mv_avg_d1, 0, sizeof(mv_avg_d1));
-    index_mv_avg1 = 0;
-    count_d1 = 0;
     d1 = 0;
 }
 
 static void reset_d2_filter_buffer() {
-    memset(mv_avg_d2, 0, sizeof(mv_avg_d2));
-    index_mv_avg2 = 0;
-    count_d2 = 0;
     d2 = 0;
 }
 
-static void reset_speed_filter_buffer() {
-    memset(mv_avg_speed, 0, sizeof(mv_avg_speed));
-    index_mv_avg_speed = 0;
-    count_speed = 0;
+static void reset_speed_estimator() {
     ball_speed_mm_per_s = 0;
-    ball_speed_filtered_mm_per_s = 0.0f;
+    ball_speed_estimate_mm_s = 0.0f;
     speed_valid = false;
+}
+
+static int interpolate_noise_value(const int *values, int position_mm) {
+    int clamped_position = clamp_int_local(position_mm, 0, table_length_mm);
+
+    if(clamped_position <= noise_profile_positions_mm[0]){
+        return values[0];
+    }
+
+    for(int i = 1; i < NOISE_PROFILE_POINT_COUNT; i++){
+        int x0 = noise_profile_positions_mm[i - 1];
+        int x1 = noise_profile_positions_mm[i];
+
+        if(clamped_position <= x1){
+            if(x1 <= x0) return values[i];
+
+            float t = (float)(clamped_position - x0) / (float)(x1 - x0);
+            return (int)lroundf((float)values[i - 1] +
+                                t * (float)(values[i] - values[i - 1]));
+        }
+    }
+
+    return values[NOISE_PROFILE_POINT_COUNT - 1];
 }
 
 static const int EPSILON = 1;   
@@ -281,10 +296,7 @@ void update_tof_distances(){
         last_processed_d1_ms = tof_1_update_ms;
 
         if(staff_d1 >= 0){
-            mv_avg_d1[index_mv_avg1] = staff_d1;
-            index_mv_avg1 = (index_mv_avg1 + 1) % position_filter_window;
-            if (count_d1 < position_filter_window) count_d1++;
-
+            d1 = staff_d1;
             last_valid_d1_ms = tof_1_update_ms;
             d1_valid = true;
         } else {
@@ -297,10 +309,7 @@ void update_tof_distances(){
         last_processed_d2_ms = tof_2_update_ms;
 
         if(staff_d2 >= 0){
-            mv_avg_d2[index_mv_avg2] = staff_d2;
-            index_mv_avg2 = (index_mv_avg2 + 1) % position_filter_window;
-            if (count_d2 < position_filter_window) count_d2++;
-
+            d2 = staff_d2;
             last_valid_d2_ms = tof_2_update_ms;
             d2_valid = true;
         } else {
@@ -321,20 +330,6 @@ void update_tof_distances(){
         d2_valid = false;
     }
 
-    int sum_d1 = 0;
-    int sum_d2 = 0;
-
-    
-    for (int i = 0; i < count_d1; i++) {
-        sum_d1 += mv_avg_d1[i];
-    }
-
-    for (int i = 0; i < count_d2; i++) {
-        sum_d2 += mv_avg_d2[i];
-    }
-
-    if (count_d1 > 0) d1 = sum_d1 / count_d1;
-    if (count_d2 > 0) d2 = sum_d2 / count_d2;
 }
 
 bool compute_ball_speed(){
@@ -344,17 +339,17 @@ bool compute_ball_speed(){
         ball_position_prev_valid = false;
         speed_valid = false;
         ball_speed_mm_per_s = 0;
-        ball_speed_filtered_mm_per_s = 0.0f;
+        ball_speed_estimate_mm_s = 0.0f;
         return false;
     }
 
     if(!ball_position_prev_valid){
-        ball_position_prev_mm = ball_position_mm;
+        ball_position_estimate_mm = (float)ball_position_mm;
+        ball_speed_estimate_mm_s = 0.0f;
         last_ball_position_update_ms = now;
         ball_position_prev_valid = true;
         speed_valid = false;
         ball_speed_mm_per_s = 0;
-        ball_speed_filtered_mm_per_s = 0.0f;
         return false;
     }
 
@@ -365,22 +360,45 @@ bool compute_ball_speed(){
         return false;
     }
 
-    int delta_position_mm = ball_position_mm - ball_position_prev_mm;
-    int raw_speed_mm_per_s = (delta_position_mm * 1000) / (int)dt_ms;
-
-    mv_avg_speed[index_mv_avg_speed] = raw_speed_mm_per_s;
-    index_mv_avg_speed = (index_mv_avg_speed + 1) % speed_filter_window;
-    if(count_speed < speed_filter_window) count_speed++;
-
-    int sum_speed = 0;
-    for(int i = 0; i < count_speed; i++){
-        sum_speed += mv_avg_speed[i];
+    if(dt_ms > SPEED_ESTIMATOR_RESET_DT_MS){
+        ball_position_estimate_mm = (float)ball_position_mm;
+        ball_speed_estimate_mm_s = 0.0f;
+        last_ball_position_update_ms = now;
+        reset_speed_estimator();
+        ball_position_prev_valid = true;
+        return false;
     }
 
-    ball_speed_mm_per_s = (count_speed > 0) ? (sum_speed / count_speed) : 0;
-    ball_speed_filtered_mm_per_s = (float)ball_speed_mm_per_s;
+    float dt_s = (float)dt_ms * 0.001f;
+    float measured_position_mm = (float)ball_position_mm;
+    int local_position_noise_mm = max(1, get_position_noise_deadband_mm(ball_position_mm));
 
-    ball_position_prev_mm = ball_position_mm;
+    float noise_scale = (float)local_position_noise_mm / (float)DEFAULT_POSITION_NOISE_DEADBAND_MM;
+    noise_scale = clamp_float_local(noise_scale, 1.0f, 4.0f);
+
+    float alpha = clamp_float_local(alpha_beta_max_alpha / noise_scale,
+                                    alpha_beta_min_alpha,
+                                    alpha_beta_max_alpha);
+    float beta = clamp_float_local(alpha_beta_max_beta / noise_scale,
+                                   alpha_beta_min_beta,
+                                   alpha_beta_max_beta);
+
+    float predicted_position_mm = ball_position_estimate_mm + ball_speed_estimate_mm_s * dt_s;
+    float innovation_mm = measured_position_mm - predicted_position_mm;
+
+    float innovation_scale = fabsf(innovation_mm) / (float)(local_position_noise_mm * 8);
+    if(innovation_scale > 1.0f){
+        float trust_scale = 1.0f / sqrtf(innovation_scale);
+        alpha *= clamp_float_local(trust_scale, 0.55f, 1.0f);
+        beta *= clamp_float_local(trust_scale, 0.55f, 1.0f);
+    }
+
+    ball_position_estimate_mm = predicted_position_mm + alpha * innovation_mm;
+    ball_position_estimate_mm = clamp_float_local(ball_position_estimate_mm, 0.0f, (float)table_length_mm);
+    ball_speed_estimate_mm_s += beta * innovation_mm / dt_s;
+
+    ball_speed_mm_per_s = (int)lroundf(ball_speed_estimate_mm_s);
+
     last_ball_position_update_ms = now;
     speed_valid = true;
 
@@ -473,39 +491,86 @@ bool is_ball_speed_valid(){
     return speed_valid;
 }
 
-bool set_position_filter_window(int window){
-    if(window < FILTER_MIN_WINDOW || window > FILTER_MAX_WINDOW){
+bool set_noise_rejection_profile(const int *positions_mm,
+                                 const int *position_noise_mm,
+                                 const int *speed_noise_mm_s,
+                                 int count){
+    if(positions_mm == nullptr || position_noise_mm == nullptr ||
+       speed_noise_mm_s == nullptr || count != NOISE_PROFILE_POINT_COUNT){
         return false;
     }
 
-    if(window != position_filter_window){
-        position_filter_window = window;
-        reset_position_filter_buffers();
+    for(int i = 0; i < count; i++){
+        if(positions_mm[i] < 0 || positions_mm[i] > table_length_mm ||
+           position_noise_mm[i] < 0 || position_noise_mm[i] > 100 ||
+           speed_noise_mm_s[i] < 0 || speed_noise_mm_s[i] > 1000){
+            return false;
+        }
+
+        if(i > 0 && positions_mm[i] <= positions_mm[i - 1]){
+            return false;
+        }
     }
 
+    for(int i = 0; i < count; i++){
+        noise_profile_positions_mm[i] = positions_mm[i];
+        position_noise_deadband_mm[i] = position_noise_mm[i];
+        speed_noise_deadband_mm_s[i] = speed_noise_mm_s[i];
+    }
+
+    reset_speed_estimator();
+    ball_position_prev_valid = false;
     return true;
 }
 
-int get_position_filter_window(){
-    return position_filter_window;
+void get_noise_rejection_profile(int *positions_mm,
+                                 int *position_noise_mm,
+                                 int *speed_noise_mm_s,
+                                 int count){
+    if(count > NOISE_PROFILE_POINT_COUNT){
+        count = NOISE_PROFILE_POINT_COUNT;
+    }
+
+    for(int i = 0; i < count; i++){
+        if(positions_mm != nullptr) positions_mm[i] = noise_profile_positions_mm[i];
+        if(position_noise_mm != nullptr) position_noise_mm[i] = position_noise_deadband_mm[i];
+        if(speed_noise_mm_s != nullptr) speed_noise_mm_s[i] = speed_noise_deadband_mm_s[i];
+    }
 }
 
-bool set_speed_filter_window(int window){
-    if(window < FILTER_MIN_WINDOW || window > FILTER_MAX_WINDOW){
+int get_position_noise_deadband_mm(int position_mm){
+    return interpolate_noise_value(position_noise_deadband_mm, position_mm);
+}
+
+int get_speed_noise_deadband_mm_s(int position_mm){
+    return interpolate_noise_value(speed_noise_deadband_mm_s, position_mm);
+}
+
+bool set_alpha_beta_parameters(float min_alpha, float max_alpha,
+                               float min_beta, float max_beta){
+    if(min_alpha < 0.0f || min_alpha > 1.0f ||
+       max_alpha < 0.0f || max_alpha > 1.0f ||
+       min_beta < 0.0f || min_beta > 2.0f ||
+       max_beta < 0.0f || max_beta > 2.0f ||
+       min_alpha > max_alpha || min_beta > max_beta){
         return false;
     }
 
-    if(window != speed_filter_window){
-        speed_filter_window = window;
-        reset_speed_filter_buffer();
-        ball_position_prev_valid = false;
-    }
-
+    alpha_beta_min_alpha = min_alpha;
+    alpha_beta_max_alpha = max_alpha;
+    alpha_beta_min_beta = min_beta;
+    alpha_beta_max_beta = max_beta;
+    reset_speed_estimator();
+    ball_position_prev_valid = false;
     return true;
 }
 
-int get_speed_filter_window(){
-    return speed_filter_window;
+void get_alpha_beta_parameters(float *min_alpha, float *max_alpha,
+                               float *min_beta, float *max_beta){
+    if(min_alpha != nullptr) *min_alpha = alpha_beta_min_alpha;
+    if(max_alpha != nullptr) *max_alpha = alpha_beta_max_alpha;
+    if(min_beta != nullptr) *min_beta = alpha_beta_min_beta;
+    if(max_beta != nullptr) *max_beta = alpha_beta_max_beta;
 }
 
 bool set_table_length_mm(int new_table_length_mm){
@@ -515,7 +580,7 @@ bool set_table_length_mm(int new_table_length_mm){
 
     table_length_mm = new_table_length_mm;
     ball_position_prev_valid = false;
-    reset_speed_filter_buffer();
+    reset_speed_estimator();
     return true;
 }
 
@@ -525,11 +590,30 @@ int get_table_length_mm(){
 
 void reset_ball_position_advanced_parameters(){
     table_length_mm = TABLE_LENGTH_DEFAULT_MM;
-    position_filter_window = POSITION_FILTER_DEFAULT_WINDOW;
-    speed_filter_window = SPEED_FILTER_DEFAULT_WINDOW;
-    reset_position_filter_buffers();
-    reset_speed_filter_buffer();
+    set_alpha_beta_parameters(ALPHA_BETA_DEFAULT_MIN_ALPHA,
+                              ALPHA_BETA_DEFAULT_MAX_ALPHA,
+                              ALPHA_BETA_DEFAULT_MIN_BETA,
+                              ALPHA_BETA_DEFAULT_MAX_BETA);
+    reset_d1_filter_buffer();
+    reset_d2_filter_buffer();
+    reset_speed_estimator();
     ball_position_prev_valid = false;
+    int positions[NOISE_PROFILE_POINT_COUNT] = {0, 72, 145, 218, TABLE_LENGTH_DEFAULT_MM};
+    int position_noise[NOISE_PROFILE_POINT_COUNT] = {
+        DEFAULT_POSITION_NOISE_DEADBAND_MM,
+        DEFAULT_POSITION_NOISE_DEADBAND_MM,
+        DEFAULT_POSITION_NOISE_DEADBAND_MM,
+        DEFAULT_POSITION_NOISE_DEADBAND_MM,
+        DEFAULT_POSITION_NOISE_DEADBAND_MM
+    };
+    int speed_noise[NOISE_PROFILE_POINT_COUNT] = {
+        DEFAULT_SPEED_NOISE_DEADBAND_MM_S,
+        DEFAULT_SPEED_NOISE_DEADBAND_MM_S,
+        DEFAULT_SPEED_NOISE_DEADBAND_MM_S,
+        DEFAULT_SPEED_NOISE_DEADBAND_MM_S,
+        DEFAULT_SPEED_NOISE_DEADBAND_MM_S
+    };
+    set_noise_rejection_profile(positions, position_noise, speed_noise, NOISE_PROFILE_POINT_COUNT);
 }
 
 static size_t previous_line_length = 0;

@@ -18,7 +18,7 @@ static const uint32_t WEB_TASK_DELAY_MS = 1;
 static const char *CALIBRATION_NAMESPACE = "tof_cal";
 static const char *CALIBRATION_DONE_KEY = "done";
 static const char *CALIBRATION_VERSION_KEY = "version";
-static const uint32_t CALIBRATION_SCHEMA_VERSION = 7;
+static const uint32_t CALIBRATION_SCHEMA_VERSION = 8;
 static const char *CONTROLLER_NAMESPACE = "ctrl";
 static const char *CONTROLLER_VERSION_KEY = "version";
 static const uint32_t CONTROLLER_SCHEMA_VERSION = 1;
@@ -26,7 +26,7 @@ static const uint32_t CONTROLLER_SAVE_COOLDOWN_MS = 2000;
 static const float CONTROLLER_SAVE_FLOAT_EPSILON = 0.000001f;
 static const char *ADVANCED_NAMESPACE = "advanced";
 static const char *ADVANCED_VERSION_KEY = "version";
-static const uint32_t ADVANCED_SCHEMA_VERSION = 2;
+static const uint32_t ADVANCED_SCHEMA_VERSION = 5;
 static const uint32_t ADVANCED_SAVE_COOLDOWN_MS = 2000;
 static const int PLOT_DEFAULT_MAX_SECONDS = 30;
 static const int PLOT_MIN_MAX_SECONDS = 10;
@@ -48,6 +48,12 @@ enum CalibrationStep {
   CAL_TOF2_PLACE_72,
   CAL_TOF2_PLACE_0,
   CAL_VERIFY,
+  CAL_NOISE_0,
+  CAL_NOISE_72,
+  CAL_NOISE_145,
+  CAL_NOISE_218,
+  CAL_NOISE_290,
+  CAL_NOISE_DONE,
   CAL_ERROR,
 };
 
@@ -56,6 +62,7 @@ enum CalibrationMode {
   CAL_MODE_MANUAL_TOF1,
   CAL_MODE_MANUAL_TOF2,
   CAL_MODE_VERIFY_ONLY,
+  CAL_MODE_NOISE_ONLY,
 };
 
 struct TofCalibrationDraft {
@@ -72,9 +79,28 @@ struct ServoCalibrationDraft {
   int neutral_angle = SERVO_CMD_NEUTRAL_DEG;
 };
 
+struct NoiseCalibrationDraft {
+  int position_mm[NOISE_PROFILE_POINT_COUNT] = {0, 72, 145, 218, TABLE_LENGTH_DEFAULT_MM};
+  int position_noise_mm[NOISE_PROFILE_POINT_COUNT] = {
+      DEFAULT_POSITION_NOISE_DEADBAND_MM,
+      DEFAULT_POSITION_NOISE_DEADBAND_MM,
+      DEFAULT_POSITION_NOISE_DEADBAND_MM,
+      DEFAULT_POSITION_NOISE_DEADBAND_MM,
+      DEFAULT_POSITION_NOISE_DEADBAND_MM
+  };
+  int speed_noise_mm_s[NOISE_PROFILE_POINT_COUNT] = {
+      DEFAULT_SPEED_NOISE_DEADBAND_MM_S,
+      DEFAULT_SPEED_NOISE_DEADBAND_MM_S,
+      DEFAULT_SPEED_NOISE_DEADBAND_MM_S,
+      DEFAULT_SPEED_NOISE_DEADBAND_MM_S,
+      DEFAULT_SPEED_NOISE_DEADBAND_MM_S
+  };
+};
+
 static ServoCalibrationDraft calibration_servo;
 static TofCalibrationDraft calibration_tof1;
 static TofCalibrationDraft calibration_tof2;
+static NoiseCalibrationDraft calibration_noise;
 static CalibrationStep calibration_step = CAL_TOF1_FIND_FOV;
 static CalibrationMode calibration_mode = CAL_MODE_INITIAL_BOTH;
 static bool calibration_flow_done = false;
@@ -368,6 +394,7 @@ button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:22p
 <button onclick="location.href='/calibration?manual=1&target=2'">Calibrate TOF 2</button>
 </div>
 <button class="back" onclick="location.href='/calibration?verify=1'">Verify calibration</button>
+<button class="back" onclick="location.href='/calibration?noise=1'">Noise rejection</button>
 <a class="back" href="/">Retour</a>
 </section>
 </body>
@@ -396,10 +423,14 @@ button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:18p
 <section class="panel"><h1>Advanced parameters</h1><div class="small" id="status">Runtime parameters. Use reset to restore development defaults.</div></section>
 <div class="grid">
 <section class="panel"><h1>Position and speed filtering</h1><div class="form">
-<label>Position moving average window [samples]</label><input id="posWin" type="number" min="1" max="20" step="1">
-<label>Speed moving average window [samples]</label><input id="speedWin" type="number" min="1" max="20" step="1">
+<label>Max speed used by controller [mm/s]</label><input id="maxSpeed" type="number" min="0" max="2000" step="10">
+<label>Alpha-beta min alpha</label><input id="abMinAlpha" type="number" min="0" max="1" step="0.01">
+<label>Alpha-beta max alpha</label><input id="abMaxAlpha" type="number" min="0" max="1" step="0.01">
+<label>Alpha-beta min beta</label><input id="abMinBeta" type="number" min="0" max="2" step="0.01">
+<label>Alpha-beta max beta</label><input id="abMaxBeta" type="number" min="0" max="2" step="0.01">
 </div></section>
 <section class="panel"><h1>PID controller</h1><div class="form">
+<label>Controller period [ms]</label><input id="ctrlPeriod" type="number" min="10" max="100" step="1">
 <label>Max angle step / cycle [deg]</label><input id="maxStep" type="number" min="0" max="180" step="1">
 <label>Position precision [mm]</label><input id="posDb" type="number" min="0" max="50" step="1">
 <label>Speed precision [mm/s]</label><input id="speedDb" type="number" min="0" max="300" step="1">
@@ -427,20 +458,23 @@ button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:18p
 </div>
 <div class="toast" id="toast"></div>
 <script>
-const ids=['posWin','speedWin','maxStep','posDb','speedDb','lostDelay','lostIter','servoMin','servoMax','servoNeutral','tableLen','plotMax'];
+const ids=['maxSpeed','abMinAlpha','abMaxAlpha','abMinBeta','abMaxBeta','ctrlPeriod','maxStep','posDb','speedDb','lostDelay','lostIter','servoMin','servoMax','servoNeutral','tableLen','plotMax'];
 const el=Object.fromEntries(ids.map(id=>[id,document.getElementById(id)]));
 const statusEl=document.getElementById('status');
 const saveBtn=document.getElementById('saveBtn');
 const toast=document.getElementById('toast');let toastTimer=null;
 function notify(msg){toast.textContent=msg;toast.style.display='block';if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(()=>toast.style.display='none',3000)}
-function fill(s){el.posWin.value=s.position_window;el.speedWin.value=s.speed_window;el.maxStep.value=s.max_step;el.posDb.value=s.position_deadband;el.speedDb.value=s.speed_deadband;el.lostDelay.value=(Number(s.lost_delay)/1000).toFixed(1);el.lostIter.value=s.lost_iter;el.servoMin.value=s.servo_min;el.servoMax.value=s.servo_max;el.servoNeutral.value=s.servo_neutral;el.tableLen.value=s.table_length;el.plotMax.value=s.plot_max_s}
+function fill(s){el.maxSpeed.value=s.max_control_speed;el.abMinAlpha.value=Number(s.alpha_beta_min_alpha).toFixed(2);el.abMaxAlpha.value=Number(s.alpha_beta_max_alpha).toFixed(2);el.abMinBeta.value=Number(s.alpha_beta_min_beta).toFixed(2);el.abMaxBeta.value=Number(s.alpha_beta_max_beta).toFixed(2);el.ctrlPeriod.value=s.controller_period;el.maxStep.value=s.max_step;el.posDb.value=s.position_deadband;el.speedDb.value=s.speed_deadband;el.lostDelay.value=(Number(s.lost_delay)/1000).toFixed(1);el.lostIter.value=s.lost_iter;el.servoMin.value=s.servo_min;el.servoMax.value=s.servo_max;el.servoNeutral.value=s.servo_neutral;el.tableLen.value=s.table_length;el.plotMax.value=s.plot_max_s}
 async function load(){try{const r=await fetch('/api/advanced',{cache:'no-store'});fill(await r.json())}catch(e){statusEl.textContent='Load failed.'}}
-function query(){return `pos_win=${el.posWin.value}&speed_win=${el.speedWin.value}&max_step=${el.maxStep.value}&pos_db=${el.posDb.value}&speed_db=${el.speedDb.value}&lost_delay=${Math.round(Number(el.lostDelay.value)*1000)}&lost_iter=${el.lostIter.value}&servo_min=${el.servoMin.value}&servo_max=${el.servoMax.value}&servo_neutral=${el.servoNeutral.value}&table_len=${el.tableLen.value}&plot_max=${el.plotMax.value}`}
+function query(){return `max_speed=${el.maxSpeed.value}&ab_min_alpha=${el.abMinAlpha.value}&ab_max_alpha=${el.abMaxAlpha.value}&ab_min_beta=${el.abMinBeta.value}&ab_max_beta=${el.abMaxBeta.value}&ctrl_period=${el.ctrlPeriod.value}&max_step=${el.maxStep.value}&pos_db=${el.posDb.value}&speed_db=${el.speedDb.value}&lost_delay=${Math.round(Number(el.lostDelay.value)*1000)}&lost_iter=${el.lostIter.value}&servo_min=${el.servoMin.value}&servo_max=${el.servoMax.value}&servo_neutral=${el.servoNeutral.value}&table_len=${el.tableLen.value}&plot_max=${el.plotMax.value}`}
 function num(id){return Number(el[id].value)}
 function inRange(v,min,max){return Number.isFinite(v)&&v>=min&&v<=max}
 function validateAdvanced(){
   const sm=num('servoMin'),sx=num('servoMax'),sn=num('servoNeutral');
-  if(!inRange(num('posWin'),1,20)||!inRange(num('speedWin'),1,20))return 'Les fenetres de moyenne doivent etre entre 1 et 20.';
+  if(!inRange(num('maxSpeed'),0,2000))return 'La vitesse max utilisee par le controleur doit etre entre 0 et 2000 mm/s.';
+  if(!inRange(num('abMinAlpha'),0,1)||!inRange(num('abMaxAlpha'),0,1)||num('abMinAlpha')>num('abMaxAlpha'))return 'Alpha invalide: 0 <= min <= max <= 1.';
+  if(!inRange(num('abMinBeta'),0,2)||!inRange(num('abMaxBeta'),0,2)||num('abMinBeta')>num('abMaxBeta'))return 'Beta invalide: 0 <= min <= max <= 2.';
+  if(!inRange(num('ctrlPeriod'),10,100))return 'La periode du controleur doit etre entre 10 et 100 ms.';
   if(!inRange(num('maxStep'),0,180)||!inRange(num('posDb'),0,50)||!inRange(num('speedDb'),0,300))return 'Parametre PID hors limites.';
   if(!inRange(num('lostDelay'),0,10)||!inRange(num('lostIter'),1,20))return 'Parametre de balle perdue hors limites.';
   if(!inRange(sm,0,180)||!inRange(sx,0,180)||sm>=sx||sn<sm||sn>sx)return 'Angles servo invalides: min < max et neutre dans la plage 0-180 deg.';
@@ -598,8 +632,8 @@ c.beginPath();c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke();c.beginPath();c.moveTo(
 let pos=s.visual_pos_mm; if(!Number.isFinite(pos)||pos<0)pos=TABLE_LEN_MM/2; pos=Math.max(0,Math.min(TABLE_LEN_MM,pos)); const p=pos/TABLE_LEN_MM;
 const r=Math.max(15,Math.min(w,h)*.045),contactX=x1+(x2-x1)*p,contactY=y1+(y2-y1)*p,bx=contactX+nx*r,by=contactY+ny*r;
 c.beginPath();c.arc(bx,by,r,0,Math.PI*2);c.stroke();c.beginPath();c.moveTo(bx-r*.65,by-r*.65);c.lineTo(bx+r*.65,by+r*.65);c.moveTo(bx+r*.65,by-r*.65);c.lineTo(bx-r*.65,by+r*.65);c.stroke();
-if(s.step==='verify'){[0,72,145,218,290].forEach(mm=>{const x=x1+(x2-x1)*(mm/TABLE_LEN_MM);c.strokeStyle='#208444';c.fillStyle='#208444';c.lineWidth=3;c.beginPath();c.moveTo(x,cy+30);c.lineTo(x,cy+70);c.stroke();c.beginPath();c.moveTo(x,cy+24);c.lineTo(x-8,cy+42);c.lineTo(x+8,cy+42);c.closePath();c.fill();c.fillText(`${mm}`,x-10,cy+90)});c.strokeStyle='#171717';c.fillStyle='#171717'}
-if(s.step!=='verify'&&s.tof){
+if(s.step==='verify'||String(s.step||'').startsWith('noise')){[0,72,145,218,290].forEach(mm=>{const x=x1+(x2-x1)*(mm/TABLE_LEN_MM);c.strokeStyle='#208444';c.fillStyle='#208444';c.lineWidth=3;c.beginPath();c.moveTo(x,cy+30);c.lineTo(x,cy+70);c.stroke();c.beginPath();c.moveTo(x,cy+24);c.lineTo(x-8,cy+42);c.lineTo(x+8,cy+42);c.closePath();c.fill();c.fillText(`${mm}`,x-10,cy+90)});c.strokeStyle='#171717';c.fillStyle='#171717'}
+if(s.step!=='verify'&&!String(s.step||'').startsWith('noise')&&s.tof){
   const tx=s.tof===1?x2:x1,dir=s.tof===1?-1:1,ay=cy-76;
   c.strokeStyle='#2457b8';c.fillStyle='#2457b8';c.lineWidth=5;
   c.beginPath();c.moveTo(tx+dir*70,ay);c.lineTo(tx+dir*14,ay);c.stroke();
@@ -612,12 +646,13 @@ c.font=`${Math.max(14,w*.018)}px Arial`;c.fillText(`visual pos=${Math.round(pos)
 function setButtons(){
 const verifyOnly=params.get('verify')==='1';
 const verifyStep=s.step==='verify';
+const noiseStep=String(s.step||'').startsWith('noise');
 doneBtn.classList.toggle('hidden',!s.needs_done);
 submitBtn.classList.toggle('hidden',!s.needs_real_input);
 realRow.classList.toggle('hidden',!s.needs_real_input);
-rawRow.classList.toggle('hidden',verifyStep);
+rawRow.classList.toggle('hidden',verifyStep||noiseStep);
 statusEl.classList.toggle('hidden',verifyStep);
-acceptBtn.classList.toggle('hidden',s.step!=='verify');
+acceptBtn.classList.toggle('hidden',s.step!=='verify'&&s.step!=='noise_done');
 restartBtn.classList.toggle('hidden',false);
 cancelBtn.classList.toggle('hidden',params.get('initial')==='1');
 if(verifyOnly){
@@ -629,7 +664,7 @@ if(verifyOnly){
   realRow.classList.add('hidden');
   doneBtn.textContent='Done';
 }else{
-  doneBtn.textContent='Done';
+  doneBtn.textContent=noiseStep?'Capture bruit':'Done';
 }
 if(s.needs_real_input && !realInputEditing && (s.step!==lastInputStep || !realInput.value)){
   realInput.value=s.real_fov||145;
@@ -653,6 +688,7 @@ if(startupDone)return;
 startupDone=true;
 if(params.get('initial')==='1'||params.get('after_servo')==='1')await fetch('/api/calibration/action?cmd=start&mode=initial_tofs',{cache:'no-store'});
 else if(params.get('verify')==='1')await fetch('/api/calibration/action?cmd=start&mode=verify',{cache:'no-store'});
+else if(params.get('noise')==='1')await fetch('/api/calibration/action?cmd=start&mode=noise',{cache:'no-store'});
 else if(params.get('target')==='1')await fetch('/api/calibration/action?cmd=start&target=1',{cache:'no-store'});
 else if(params.get('target')==='2')await fetch('/api/calibration/action?cmd=start&target=2',{cache:'no-store'});
 }
@@ -673,6 +709,28 @@ window.onresize=drawScene;setInterval(getState,REFRESH_MS);getState();
 
 static TofCalibrationDraft &draft_for_tof(int tof_number) {
   return (tof_number == TOF1) ? calibration_tof1 : calibration_tof2;
+}
+
+static int noise_step_index(CalibrationStep step) {
+  switch (step) {
+    case CAL_NOISE_0: return 0;
+    case CAL_NOISE_72: return 1;
+    case CAL_NOISE_145: return 2;
+    case CAL_NOISE_218: return 3;
+    case CAL_NOISE_290: return 4;
+    default: return -1;
+  }
+}
+
+static CalibrationStep noise_step_for_index(int index) {
+  switch (index) {
+    case 0: return CAL_NOISE_0;
+    case 1: return CAL_NOISE_72;
+    case 2: return CAL_NOISE_145;
+    case 3: return CAL_NOISE_218;
+    case 4: return CAL_NOISE_290;
+    default: return CAL_NOISE_DONE;
+  }
 }
 
 static int current_calibration_tof(void) {
@@ -746,6 +804,79 @@ static bool capture_raw_average(int tof_number, int *average_mm) {
   return true;
 }
 
+static bool capture_noise_estimate(int target_position_mm, int *position_noise_mm, int *speed_noise_mm_s) {
+  static const int SAMPLE_COUNT = 28;
+  static const uint32_t CAPTURE_TIMEOUT_MS = 2600;
+  static const uint32_t SAMPLE_PERIOD_MS = 45;
+  static const int POSITION_NOISE_MARGIN_MM = 2;
+  static const int SPEED_NOISE_MARGIN_MM_S = 20;
+
+  int count = 0;
+  int samples[SAMPLE_COUNT] = {0};
+  int max_static_speed_mm_s = 0;
+  int previous_position_mm = 0;
+  uint32_t previous_sample_ms = 0;
+  uint32_t last_sample_ms = 0;
+  uint32_t start_ms = millis();
+
+  reset_controller();
+
+  while (millis() - start_ms < CAPTURE_TIMEOUT_MS && count < SAMPLE_COUNT) {
+    update_tof_distances();
+    bool valid = compute_ball_position();
+    uint32_t now = millis();
+
+    if (valid && now - last_sample_ms >= SAMPLE_PERIOD_MS) {
+      int position_mm = get_ball_position();
+      samples[count] = position_mm;
+
+      if (count > 0 && now > previous_sample_ms) {
+        int dt_ms = (int)(now - previous_sample_ms);
+        int static_speed_mm_s = abs((position_mm - previous_position_mm) * 1000 / dt_ms);
+        if (static_speed_mm_s > max_static_speed_mm_s) {
+          max_static_speed_mm_s = static_speed_mm_s;
+        }
+      }
+
+      previous_position_mm = position_mm;
+      previous_sample_ms = now;
+      last_sample_ms = now;
+      count++;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+
+  if (count < SAMPLE_COUNT / 2) {
+    return false;
+  }
+
+  int sum_position_mm = 0;
+  for (int i = 0; i < count; i++) {
+    sum_position_mm += samples[i];
+  }
+
+  int mean_position_mm = (int)lroundf((float)sum_position_mm / (float)count);
+  int max_position_noise_mm = 0;
+  for (int i = 0; i < count; i++) {
+    int noise_mm = abs(samples[i] - mean_position_mm);
+    if (noise_mm > max_position_noise_mm) {
+      max_position_noise_mm = noise_mm;
+    }
+  }
+
+  int target_bias_mm = abs(mean_position_mm - target_position_mm);
+  if (target_bias_mm > 25) {
+    return false;
+  }
+
+  *position_noise_mm = max(DEFAULT_POSITION_NOISE_DEADBAND_MM,
+                           max_position_noise_mm + POSITION_NOISE_MARGIN_MM);
+  *speed_noise_mm_s = max(DEFAULT_SPEED_NOISE_DEADBAND_MM_S,
+                          max_static_speed_mm_s + SPEED_NOISE_MARGIN_MM_S);
+  return true;
+}
+
 static bool apply_draft_calibration(int tof_number) {
   TofCalibrationDraft &draft = draft_for_tof(tof_number);
   return set_tof_calibration(tof_number,
@@ -760,6 +891,7 @@ static void reset_calibration_drafts(void) {
   calibration_servo = ServoCalibrationDraft();
   calibration_tof1 = TofCalibrationDraft();
   calibration_tof2 = TofCalibrationDraft();
+  calibration_noise = NoiseCalibrationDraft();
   calibration_step = CAL_TOF1_FIND_FOV;
   calibration_mode = CAL_MODE_INITIAL_BOTH;
   calibration_flow_done = false;
@@ -801,6 +933,11 @@ static void save_draft_to_preferences(void) {
   prefs.putInt("t2_m0", calibration_tof2.meas_0);
   prefs.putInt("t2_m72", calibration_tof2.meas_72);
   prefs.putInt("t2_m145", calibration_tof2.meas_145);
+  for (int i = 0; i < NOISE_PROFILE_POINT_COUNT; i++) {
+    prefs.putInt(("n_p" + String(i)).c_str(), calibration_noise.position_mm[i]);
+    prefs.putInt(("n_x" + String(i)).c_str(), calibration_noise.position_noise_mm[i]);
+    prefs.putInt(("n_v" + String(i)).c_str(), calibration_noise.speed_noise_mm_s[i]);
+  }
   prefs.end();
 }
 
@@ -809,7 +946,7 @@ static bool load_draft_from_preferences(void) {
   prefs.begin(CALIBRATION_NAMESPACE, true);
   bool done = prefs.getBool(CALIBRATION_DONE_KEY, false);
   uint32_t version = prefs.getUInt(CALIBRATION_VERSION_KEY, 0);
-  bool compatible_calibration = done && (version == CALIBRATION_SCHEMA_VERSION);
+  bool compatible_calibration = done && (version >= 7 && version <= CALIBRATION_SCHEMA_VERSION);
 
   if (compatible_calibration) {
     calibration_servo.min_angle = prefs.getInt("sv_min", SERVO_CMD_MIN_DEG);
@@ -825,6 +962,16 @@ static bool load_draft_from_preferences(void) {
     calibration_tof2.meas_0 = prefs.getInt("t2_m0", 0);
     calibration_tof2.meas_72 = prefs.getInt("t2_m72", INFINITE_TOF_VALUE);
     calibration_tof2.meas_145 = prefs.getInt("t2_m145", INFINITE_TOF_VALUE);
+    calibration_noise = NoiseCalibrationDraft();
+    for (int i = 0; i < NOISE_PROFILE_POINT_COUNT; i++) {
+      calibration_noise.position_mm[i] = prefs.getInt(("n_p" + String(i)).c_str(), calibration_noise.position_mm[i]);
+      calibration_noise.position_noise_mm[i] = prefs.getInt(("n_x" + String(i)).c_str(), calibration_noise.position_noise_mm[i]);
+      calibration_noise.speed_noise_mm_s[i] = prefs.getInt(("n_v" + String(i)).c_str(), calibration_noise.speed_noise_mm_s[i]);
+    }
+    set_noise_rejection_profile(calibration_noise.position_mm,
+                                calibration_noise.position_noise_mm,
+                                calibration_noise.speed_noise_mm_s,
+                                NOISE_PROFILE_POINT_COUNT);
   }
 
   prefs.end();
@@ -943,6 +1090,25 @@ static void start_verify_calibration(void) {
     calibration_step = CAL_ERROR;
     distance_sensors_calibrated = false;
     calibration_error_msg = "Aucune calibration sauvegardee a verifier.";
+  }
+}
+
+static void start_noise_calibration(bool manual_mode) {
+  calibration_error_msg = "";
+  calibration_flow_done = false;
+  calibration_mode = manual_mode ? CAL_MODE_NOISE_ONLY : CAL_MODE_INITIAL_BOTH;
+  calibration_step = CAL_NOISE_0;
+  set_controller_enabled(false);
+
+  if (load_draft_from_preferences()) {
+    apply_draft_calibration(TOF1);
+    apply_draft_calibration(TOF2);
+    apply_servo_calibration_draft();
+    distance_sensors_calibrated = true;
+  } else {
+    calibration_step = CAL_ERROR;
+    distance_sensors_calibrated = false;
+    calibration_error_msg = "Aucune calibration TOF sauvegardee. Faites la calibration initiale avant le bruit.";
   }
 }
 
@@ -1120,10 +1286,20 @@ static void send_state(void) {
 }
 
 static void send_advanced_state(bool ok = true) {
+  float ab_min_alpha = 0.0f;
+  float ab_max_alpha = 0.0f;
+  float ab_min_beta = 0.0f;
+  float ab_max_beta = 0.0f;
+  get_alpha_beta_parameters(&ab_min_alpha, &ab_max_alpha, &ab_min_beta, &ab_max_beta);
+
   String json = "{";
   json += "\"ok\":" + String(ok ? "true" : "false") + ",";
-  json += "\"position_window\":" + String(get_position_filter_window()) + ",";
-  json += "\"speed_window\":" + String(get_speed_filter_window()) + ",";
+  json += "\"max_control_speed\":" + String(get_controller_max_control_speed_mm_s()) + ",";
+  json += "\"alpha_beta_min_alpha\":" + String(ab_min_alpha, 4) + ",";
+  json += "\"alpha_beta_max_alpha\":" + String(ab_max_alpha, 4) + ",";
+  json += "\"alpha_beta_min_beta\":" + String(ab_min_beta, 4) + ",";
+  json += "\"alpha_beta_max_beta\":" + String(ab_max_beta, 4) + ",";
+  json += "\"controller_period\":" + String(get_controller_period_ms()) + ",";
   json += "\"max_step\":" + String(get_controller_max_step_deg()) + ",";
   json += "\"position_deadband\":" + String(get_controller_stabilization_position_deadband_mm()) + ",";
   json += "\"speed_deadband\":" + String(get_controller_stabilization_speed_deadband_mm_s()) + ",";
@@ -1141,12 +1317,28 @@ static void send_advanced_state(bool ok = true) {
 static bool update_advanced_params_from_request(void) {
   bool ok = true;
 
-  if (server.hasArg("pos_win")) {
-    ok = set_position_filter_window(server.arg("pos_win").toInt()) && ok;
+  if (server.hasArg("max_speed")) {
+    ok = set_controller_max_control_speed_mm_s(server.arg("max_speed").toInt()) && ok;
   }
 
-  if (server.hasArg("speed_win")) {
-    ok = set_speed_filter_window(server.arg("speed_win").toInt()) && ok;
+  float ab_min_alpha = 0.0f;
+  float ab_max_alpha = 0.0f;
+  float ab_min_beta = 0.0f;
+  float ab_max_beta = 0.0f;
+  get_alpha_beta_parameters(&ab_min_alpha, &ab_max_alpha, &ab_min_beta, &ab_max_beta);
+
+  if (server.hasArg("ab_min_alpha")) ab_min_alpha = server.arg("ab_min_alpha").toFloat();
+  if (server.hasArg("ab_max_alpha")) ab_max_alpha = server.arg("ab_max_alpha").toFloat();
+  if (server.hasArg("ab_min_beta")) ab_min_beta = server.arg("ab_min_beta").toFloat();
+  if (server.hasArg("ab_max_beta")) ab_max_beta = server.arg("ab_max_beta").toFloat();
+  if (server.hasArg("ab_min_alpha") || server.hasArg("ab_max_alpha") ||
+      server.hasArg("ab_min_beta") || server.hasArg("ab_max_beta")) {
+    ok = set_alpha_beta_parameters(ab_min_alpha, ab_max_alpha,
+                                   ab_min_beta, ab_max_beta) && ok;
+  }
+
+  if (server.hasArg("ctrl_period")) {
+    ok = set_controller_period_ms((uint32_t)server.arg("ctrl_period").toInt()) && ok;
   }
 
   if (server.hasArg("max_step")) {
@@ -1200,6 +1392,12 @@ static void reset_all_advanced_parameters(void) {
 }
 
 static bool advanced_settings_match_saved(void) {
+  float ab_min_alpha = 0.0f;
+  float ab_max_alpha = 0.0f;
+  float ab_min_beta = 0.0f;
+  float ab_max_beta = 0.0f;
+  get_alpha_beta_parameters(&ab_min_alpha, &ab_max_alpha, &ab_min_beta, &ab_max_beta);
+
   Preferences prefs;
   prefs.begin(ADVANCED_NAMESPACE, true);
   uint32_t version = prefs.getUInt(ADVANCED_VERSION_KEY, 0);
@@ -1209,8 +1407,12 @@ static bool advanced_settings_match_saved(void) {
     return false;
   }
 
-  bool same = prefs.getInt("pos_win", -1) == get_position_filter_window() &&
-              prefs.getInt("speed_win", -1) == get_speed_filter_window() &&
+  bool same = prefs.getInt("max_speed", -1) == get_controller_max_control_speed_mm_s() &&
+              fabsf(prefs.getFloat("ab_min_a", -1.0f) - ab_min_alpha) <= CONTROLLER_SAVE_FLOAT_EPSILON &&
+              fabsf(prefs.getFloat("ab_max_a", -1.0f) - ab_max_alpha) <= CONTROLLER_SAVE_FLOAT_EPSILON &&
+              fabsf(prefs.getFloat("ab_min_b", -1.0f) - ab_min_beta) <= CONTROLLER_SAVE_FLOAT_EPSILON &&
+              fabsf(prefs.getFloat("ab_max_b", -1.0f) - ab_max_beta) <= CONTROLLER_SAVE_FLOAT_EPSILON &&
+              prefs.getUInt("ctrl_period", UINT32_MAX) == get_controller_period_ms() &&
               prefs.getInt("max_step", -1) == get_controller_max_step_deg() &&
               prefs.getInt("pos_db", -1) == get_controller_stabilization_position_deadband_mm() &&
               prefs.getInt("speed_db", -1) == get_controller_stabilization_speed_deadband_mm_s() &&
@@ -1227,6 +1429,12 @@ static bool advanced_settings_match_saved(void) {
 }
 
 static bool save_advanced_settings(void) {
+  float ab_min_alpha = 0.0f;
+  float ab_max_alpha = 0.0f;
+  float ab_min_beta = 0.0f;
+  float ab_max_beta = 0.0f;
+  get_alpha_beta_parameters(&ab_min_alpha, &ab_max_alpha, &ab_min_beta, &ab_max_beta);
+
   uint32_t now = millis();
   if (last_advanced_save_request_ms != 0 &&
       now - last_advanced_save_request_ms < ADVANCED_SAVE_COOLDOWN_MS) {
@@ -1241,8 +1449,12 @@ static bool save_advanced_settings(void) {
   Preferences prefs;
   prefs.begin(ADVANCED_NAMESPACE, false);
   prefs.putUInt(ADVANCED_VERSION_KEY, ADVANCED_SCHEMA_VERSION);
-  prefs.putInt("pos_win", get_position_filter_window());
-  prefs.putInt("speed_win", get_speed_filter_window());
+  prefs.putInt("max_speed", get_controller_max_control_speed_mm_s());
+  prefs.putFloat("ab_min_a", ab_min_alpha);
+  prefs.putFloat("ab_max_a", ab_max_alpha);
+  prefs.putFloat("ab_min_b", ab_min_beta);
+  prefs.putFloat("ab_max_b", ab_max_beta);
+  prefs.putUInt("ctrl_period", get_controller_period_ms());
   prefs.putInt("max_step", get_controller_max_step_deg());
   prefs.putInt("pos_db", get_controller_stabilization_position_deadband_mm());
   prefs.putInt("speed_db", get_controller_stabilization_speed_deadband_mm_s());
@@ -1275,8 +1487,12 @@ static bool load_advanced_settings(void) {
     return false;
   }
 
-  int pos_win = prefs.getInt("pos_win", POSITION_FILTER_DEFAULT_WINDOW);
-  int speed_win = prefs.getInt("speed_win", SPEED_FILTER_DEFAULT_WINDOW);
+  int max_speed = prefs.getInt("max_speed", CONTROLLER_DEFAULT_MAX_CONTROL_SPEED_MM_S);
+  float ab_min_alpha = prefs.getFloat("ab_min_a", ALPHA_BETA_DEFAULT_MIN_ALPHA);
+  float ab_max_alpha = prefs.getFloat("ab_max_a", ALPHA_BETA_DEFAULT_MAX_ALPHA);
+  float ab_min_beta = prefs.getFloat("ab_min_b", ALPHA_BETA_DEFAULT_MIN_BETA);
+  float ab_max_beta = prefs.getFloat("ab_max_b", ALPHA_BETA_DEFAULT_MAX_BETA);
+  uint32_t controller_period = prefs.getUInt("ctrl_period", CONTROLLER_DEFAULT_PERIOD_MS);
   int max_step = prefs.getInt("max_step", CONTROLLER_DEFAULT_MAX_STEP_DEG);
   int pos_db = prefs.getInt("pos_db", CONTROLLER_DEFAULT_POSITION_DEADBAND_MM);
   int speed_db = prefs.getInt("speed_db", CONTROLLER_DEFAULT_SPEED_DEADBAND_MM_S);
@@ -1290,8 +1506,9 @@ static bool load_advanced_settings(void) {
   prefs.end();
 
   bool ok = true;
-  ok = set_position_filter_window(pos_win) && ok;
-  ok = set_speed_filter_window(speed_win) && ok;
+  ok = set_controller_max_control_speed_mm_s(max_speed) && ok;
+  ok = set_alpha_beta_parameters(ab_min_alpha, ab_max_alpha, ab_min_beta, ab_max_beta) && ok;
+  ok = set_controller_period_ms(controller_period) && ok;
   ok = set_controller_max_step_deg(max_step) && ok;
   ok = set_controller_stabilization_position_deadband_mm(pos_db) && ok;
   ok = set_controller_stabilization_speed_deadband_mm_s(speed_db) && ok;
@@ -1448,8 +1665,11 @@ static void send_calibration_state(void) {
   int tof_number = current_calibration_tof();
   int raw_mm = (tof_number == 0) ? -1 : raw_tof_value(tof_number);
   bool raw_valid = raw_tof_is_valid(raw_mm);
+  int noise_index = noise_step_index(calibration_step);
   int visual_pos = (calibration_step == CAL_VERIFY) ? get_ball_position()
-                                                   : visual_position_from_raw(tof_number, raw_mm);
+                   : (noise_index >= 0) ? calibration_noise.position_mm[noise_index]
+                   : (calibration_step == CAL_NOISE_DONE) ? get_ball_position()
+                   : visual_position_from_raw(tof_number, raw_mm);
 
   const char *step_name = "unknown";
   const char *title = "Calibration";
@@ -1527,6 +1747,26 @@ static void send_calibration_state(void) {
       instruction = "Verifiez que la position calibree est coherente. Les fleches vertes indiquent 0, 72, 145, 218 et 290 mm. Validez si tout est correct.";
       tof_number = 0;
       break;
+    case CAL_NOISE_0:
+    case CAL_NOISE_72:
+    case CAL_NOISE_145:
+    case CAL_NOISE_218:
+    case CAL_NOISE_290:
+      step_name = (noise_index == 0) ? "noise_0" :
+                  (noise_index == 1) ? "noise_72" :
+                  (noise_index == 2) ? "noise_145" :
+                  (noise_index == 3) ? "noise_218" : "noise_290";
+      title = "Noise rejection";
+      instruction = "Placez la balle immobile sur la fleche indiquee, puis cliquez sur Capture bruit.";
+      needs_done = true;
+      tof_number = 0;
+      break;
+    case CAL_NOISE_DONE:
+      step_name = "noise_done";
+      title = "Noise rejection terminee";
+      instruction = "Les seuils de bruit ont ete mesures. Validez pour sauvegarder ce profil de rejection.";
+      tof_number = 0;
+      break;
     case CAL_ERROR:
       step_name = "error";
       title = "Erreur de calibration";
@@ -1566,6 +1806,8 @@ static void handle_calibration_action(void) {
       start_initial_tof_calibration();
     } else if (server.arg("mode") == "verify") {
       start_verify_calibration();
+    } else if (server.arg("mode") == "noise") {
+      start_noise_calibration(true);
     } else if (server.arg("target").toInt() == TOF1) {
       start_manual_calibration(TOF1);
     } else if (server.arg("target").toInt() == TOF2) {
@@ -1587,7 +1829,11 @@ static void handle_calibration_action(void) {
   if (cmd == "restart") {
     int manual_target = manual_calibration_target();
 
-    if (calibration_mode == CAL_MODE_INITIAL_BOTH || manual_target == 0) {
+    if (calibration_mode == CAL_MODE_NOISE_ONLY) {
+      start_noise_calibration(true);
+    } else if (noise_step_index(calibration_step) >= 0 || calibration_step == CAL_NOISE_DONE) {
+      start_noise_calibration(false);
+    } else if (calibration_mode == CAL_MODE_INITIAL_BOTH || manual_target == 0) {
       start_initial_calibration();
     } else {
       start_manual_calibration(manual_target);
@@ -1598,6 +1844,23 @@ static void handle_calibration_action(void) {
   }
 
   if (cmd == "accept" && calibration_step == CAL_VERIFY) {
+    save_draft_to_preferences();
+    distance_sensors_calibrated = true;
+    servo_calibration_initial_in_progress = false;
+    if (calibration_mode == CAL_MODE_INITIAL_BOTH) {
+      start_noise_calibration(false);
+    } else {
+      calibration_flow_done = true;
+    }
+    send_calibration_state();
+    return;
+  }
+
+  if (cmd == "accept" && calibration_step == CAL_NOISE_DONE) {
+    set_noise_rejection_profile(calibration_noise.position_mm,
+                                calibration_noise.position_noise_mm,
+                                calibration_noise.speed_noise_mm_s,
+                                NOISE_PROFILE_POINT_COUNT);
     save_draft_to_preferences();
     distance_sensors_calibrated = true;
     servo_calibration_initial_in_progress = false;
@@ -1623,6 +1886,25 @@ static void handle_calibration_action(void) {
   }
 
   if (cmd == "done") {
+    int noise_index = noise_step_index(calibration_step);
+    if (noise_index >= 0) {
+      int target_position_mm = calibration_noise.position_mm[noise_index];
+      int position_noise_mm = DEFAULT_POSITION_NOISE_DEADBAND_MM;
+      int speed_noise_mm_s = DEFAULT_SPEED_NOISE_DEADBAND_MM_S;
+
+      if (!capture_noise_estimate(target_position_mm, &position_noise_mm, &speed_noise_mm_s)) {
+        calibration_error_msg = "Impossible de mesurer le bruit. Verifiez que la balle est immobile et visible.";
+        send_calibration_state();
+        return;
+      }
+
+      calibration_noise.position_noise_mm[noise_index] = position_noise_mm;
+      calibration_noise.speed_noise_mm_s[noise_index] = speed_noise_mm_s;
+      calibration_step = noise_step_for_index(noise_index + 1);
+      send_calibration_state();
+      return;
+    }
+
     int tof_number = current_calibration_tof();
     int average_mm = -1;
 

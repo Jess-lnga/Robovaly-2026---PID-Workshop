@@ -16,6 +16,8 @@ github: jess-lnga
 #define CONTROLLER_DEFAULT_SPEED_DEADBAND_MM_S 35
 #define CONTROLLER_DEFAULT_LOST_BALL_DELAY_MS 3000
 #define CONTROLLER_DEFAULT_LOST_BALL_ITER 3
+#define CONTROLLER_DEFAULT_MAX_CONTROL_SPEED_MM_S 600
+#define CONTROLLER_DEFAULT_PERIOD_MS 30
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,6 +54,12 @@ uint32_t get_controller_lost_ball_delay_ms(void);
 
 bool set_controller_lost_ball_iter(int iterations);
 int get_controller_lost_ball_iter(void);
+
+bool set_controller_max_control_speed_mm_s(int max_speed_mm_s);
+int get_controller_max_control_speed_mm_s(void);
+
+bool set_controller_period_ms(uint32_t period_ms);
+uint32_t get_controller_period_ms(void);
 
 void reset_controller_advanced_parameters(void);
 
