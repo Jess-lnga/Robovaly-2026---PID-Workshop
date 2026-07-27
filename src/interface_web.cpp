@@ -705,7 +705,7 @@ static uint32_t raw_tof_timestamp(int tof_number) {
 }
 
 static bool raw_tof_is_valid(int value) {
-  return value >= 0 && value <= 290;
+  return value >= 0 && value <= get_table_length_mm();
 }
 
 static int visual_position_from_raw(int tof_number, int raw_mm) {
@@ -713,7 +713,7 @@ static int visual_position_from_raw(int tof_number, int raw_mm) {
     return -1;
   }
 
-  return (tof_number == TOF1) ? 290 - raw_mm : raw_mm;
+  return (tof_number == TOF1) ? get_table_length_mm() - raw_mm : raw_mm;
 }
 
 static bool capture_raw_average(int tof_number, int *average_mm) {
