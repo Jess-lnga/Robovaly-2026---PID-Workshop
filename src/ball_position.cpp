@@ -52,11 +52,13 @@ static int d1 = 0;
 static int d2 = 0;
 
 // ------ BALL POSITION - SPEED - TIMESTAMPS ------
+static int ball_position_raw_mm = 0;
 static int ball_position_mm = 0;
 static float ball_position_estimate_mm = 0.0f;
 static float ball_speed_estimate_mm_s = 0.0f;
 
 static uint32_t last_ball_position_update_ms = 0;
+static uint32_t latest_tof_input_update_ms = 0;
 static bool ball_position_prev_valid = false;
 
 static int ball_speed_mm_per_s = 0;
@@ -122,6 +124,11 @@ static void reset_speed_estimator() {
     ball_speed_mm_per_s = 0;
     ball_speed_estimate_mm_s = 0.0f;
     speed_valid = false;
+}
+
+static float noise_weight_for_position(int position_mm) {
+    int noise_mm = max(1, get_position_noise_deadband_mm(position_mm));
+    return 1.0f / ((float)noise_mm * (float)noise_mm);
 }
 
 static int interpolate_noise_value(const int *values, int position_mm) {
@@ -291,9 +298,13 @@ void update_tof_distances(){
     int staff_d2  = get_mes_tof_2();
     uint32_t tof_1_update_ms = get_tof_1_last_update_ms();
     uint32_t tof_2_update_ms = get_tof_2_last_update_ms();
+    bool processed_new_input = false;
+    uint32_t newest_input_ms = latest_tof_input_update_ms;
 
     if(tof_1_update_ms != 0 && tof_1_update_ms != last_processed_d1_ms){
         last_processed_d1_ms = tof_1_update_ms;
+        processed_new_input = true;
+        newest_input_ms = max(newest_input_ms, tof_1_update_ms);
 
         if(staff_d1 >= 0){
             d1 = staff_d1;
@@ -307,6 +318,8 @@ void update_tof_distances(){
 
     if(tof_2_update_ms != 0 && tof_2_update_ms != last_processed_d2_ms){
         last_processed_d2_ms = tof_2_update_ms;
+        processed_new_input = true;
+        newest_input_ms = max(newest_input_ms, tof_2_update_ms);
 
         if(staff_d2 >= 0){
             d2 = staff_d2;
@@ -323,55 +336,75 @@ void update_tof_distances(){
     if (d1_valid && now - last_valid_d1_ms > TOF_TIMEOUT_MS) {
         reset_d1_filter_buffer();
         d1_valid = false;
+        processed_new_input = true;
+        newest_input_ms = now;
     }
 
     if (d2_valid && now - last_valid_d2_ms > TOF_TIMEOUT_MS) {
         reset_d2_filter_buffer();
         d2_valid = false;
+        processed_new_input = true;
+        newest_input_ms = now;
+    }
+
+    if(processed_new_input){
+        latest_tof_input_update_ms = newest_input_ms;
     }
 
 }
 
 bool compute_ball_speed(){
-    uint32_t now = millis();
+    uint32_t sample_ms = latest_tof_input_update_ms;
 
-    if(ball_position_mm < 0){
+    if(sample_ms == 0){
+        speed_valid = false;
+        return false;
+    }
+
+    if(sample_ms == last_ball_position_update_ms){
+        return speed_valid;
+    }
+
+    if(ball_position_raw_mm < 0){
         ball_position_prev_valid = false;
         speed_valid = false;
         ball_speed_mm_per_s = 0;
         ball_speed_estimate_mm_s = 0.0f;
+        ball_position_mm = -1;
+        last_ball_position_update_ms = sample_ms;
         return false;
     }
 
     if(!ball_position_prev_valid){
-        ball_position_estimate_mm = (float)ball_position_mm;
+        ball_position_estimate_mm = (float)ball_position_raw_mm;
         ball_speed_estimate_mm_s = 0.0f;
-        last_ball_position_update_ms = now;
+        ball_position_mm = ball_position_raw_mm;
+        last_ball_position_update_ms = sample_ms;
         ball_position_prev_valid = true;
         speed_valid = false;
         ball_speed_mm_per_s = 0;
         return false;
     }
 
-    uint32_t dt_ms = now - last_ball_position_update_ms;
+    uint32_t dt_ms = sample_ms - last_ball_position_update_ms;
 
     if(dt_ms == 0){
-        speed_valid = false;
-        return false;
+        return speed_valid;
     }
 
     if(dt_ms > SPEED_ESTIMATOR_RESET_DT_MS){
-        ball_position_estimate_mm = (float)ball_position_mm;
+        ball_position_estimate_mm = (float)ball_position_raw_mm;
         ball_speed_estimate_mm_s = 0.0f;
-        last_ball_position_update_ms = now;
+        ball_position_mm = ball_position_raw_mm;
+        last_ball_position_update_ms = sample_ms;
         reset_speed_estimator();
         ball_position_prev_valid = true;
         return false;
     }
 
     float dt_s = (float)dt_ms * 0.001f;
-    float measured_position_mm = (float)ball_position_mm;
-    int local_position_noise_mm = max(1, get_position_noise_deadband_mm(ball_position_mm));
+    float measured_position_mm = (float)ball_position_raw_mm;
+    int local_position_noise_mm = max(1, get_position_noise_deadband_mm(ball_position_raw_mm));
 
     float noise_scale = (float)local_position_noise_mm / (float)DEFAULT_POSITION_NOISE_DEADBAND_MM;
     noise_scale = clamp_float_local(noise_scale, 1.0f, 4.0f);
@@ -397,9 +430,10 @@ bool compute_ball_speed(){
     ball_position_estimate_mm = clamp_float_local(ball_position_estimate_mm, 0.0f, (float)table_length_mm);
     ball_speed_estimate_mm_s += beta * innovation_mm / dt_s;
 
+    ball_position_mm = clamp_int_local((int)lroundf(ball_position_estimate_mm), 0, table_length_mm);
     ball_speed_mm_per_s = (int)lroundf(ball_speed_estimate_mm_s);
 
-    last_ball_position_update_ms = now;
+    last_ball_position_update_ms = sample_ms;
     speed_valid = true;
 
     return true;
@@ -419,6 +453,7 @@ bool compute_ball_position(){
         if(d1_corr >= 0){
             x_from_tof1 = clamp_int_local(table_length_mm - d1_corr, 0, table_length_mm);
             tof1_weight = tof_fov_weight(d1_corr, REAL_DISTANCE_AT_FOV1);
+            tof1_weight *= noise_weight_for_position(x_from_tof1);
         }
     } else {
         d1_corr = -1;
@@ -429,6 +464,7 @@ bool compute_ball_position(){
         if(d2_corr >= 0){
             x_from_tof2 = clamp_int_local(d2_corr, 0, table_length_mm);
             tof2_weight = tof_fov_weight(d2_corr, REAL_DISTANCE_AT_FOV2);
+            tof2_weight *= noise_weight_for_position(x_from_tof2);
         }
     } else {
         d2_corr = -1;
@@ -437,7 +473,7 @@ bool compute_ball_position(){
     if((d1_corr >= 0) && (d2_corr >= 0) &&
        (d1_corr < MIN_ACCEPTABLE_TOF_VALUE_MM) &&
        (d2_corr < MIN_ACCEPTABLE_TOF_VALUE_MM)){
-        ball_position_mm = -1;
+        ball_position_raw_mm = -1;
     } else {
         float total_weight = tof1_weight + tof2_weight;
 
@@ -445,15 +481,15 @@ bool compute_ball_position(){
             float fused_position = ((tof1_weight * (float)x_from_tof1) +
                                     (tof2_weight * (float)x_from_tof2)) /
                                    total_weight;
-            ball_position_mm = clamp_int_local((int)lroundf(fused_position), 0, table_length_mm);
+            ball_position_raw_mm = clamp_int_local((int)lroundf(fused_position), 0, table_length_mm);
             position_valid = true;
         } else {
-            ball_position_mm = -1;
+            ball_position_raw_mm = -1;
         }
     }
 
     compute_ball_speed();
-    return position_valid;
+    return position_valid && ball_position_mm >= 0;
 }
 
 int get_d1(){

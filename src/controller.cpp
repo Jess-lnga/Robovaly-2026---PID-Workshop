@@ -46,6 +46,20 @@ static float clamp_float(float value, float min_value, float max_value) {
     return value;
 }
 
+static float soften_deadband_signal(float value, float deadband) {
+    if(deadband <= 0.0f) {
+        return value;
+    }
+
+    float magnitude = fabsf(value);
+    if(magnitude >= deadband) {
+        return value;
+    }
+
+    float attenuation = magnitude / deadband;
+    return value * attenuation;
+}
+
 static int command_to_servo_angle(float pid_command_deg) {
     float angle = (float)get_servo_neutral_angle_deg() - pid_command_deg;
     return clamp_int((int)lroundf(angle), get_servo_min_angle_deg(), get_servo_max_angle_deg());
@@ -179,27 +193,26 @@ bool update_controller(void) {
     speed_mm_s = clamp_int(speed_mm_s, -max_control_speed_mm_s, max_control_speed_mm_s);
 
     float error_mm = (float)reference_mm - (float)position_mm;
-    bool stable_in_deadband = speed_valid &&
-                              abs((int)lroundf(error_mm)) <= position_deadband_mm &&
-                              abs(speed_mm_s) <= speed_deadband_mm_s;
+    float effective_error_mm = soften_deadband_signal(error_mm, (float)position_deadband_mm);
+    float effective_speed_mm_s = speed_valid
+                                 ? soften_deadband_signal((float)speed_mm_s,
+                                                          (float)speed_deadband_mm_s)
+                                 : 0.0f;
 
-    int raw_angle_deg = get_servo_neutral_angle_deg();
+    integral_error_mm_s += effective_error_mm * dt_s;
+    integral_error_mm_s = clamp_float(integral_error_mm_s,
+                                      -INTEGRAL_LIMIT_MM_S,
+                                      INTEGRAL_LIMIT_MM_S);
 
-    if(stable_in_deadband) {
+    if(fabsf(effective_error_mm) < 0.001f) {
         integral_error_mm_s = 0.0f;
     }
-    else {
-        integral_error_mm_s += error_mm * dt_s;
-        integral_error_mm_s = clamp_float(integral_error_mm_s,
-                                          -INTEGRAL_LIMIT_MM_S,
-                                          INTEGRAL_LIMIT_MM_S);
 
-        float pid_command_deg = kp * error_mm +
-                                ki * integral_error_mm_s -
-                                kd * (float)speed_mm_s;
+    float pid_command_deg = kp * effective_error_mm +
+                            ki * integral_error_mm_s -
+                            kd * effective_speed_mm_s;
 
-        raw_angle_deg = command_to_servo_angle(pid_command_deg);
-    }
+    int raw_angle_deg = command_to_servo_angle(pid_command_deg);
     return command_smoothed_angle(raw_angle_deg);
 }
 
