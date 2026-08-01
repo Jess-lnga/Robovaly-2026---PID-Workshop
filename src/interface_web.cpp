@@ -18,7 +18,7 @@ static const uint32_t WEB_TASK_DELAY_MS = 1;
 static const char *CALIBRATION_NAMESPACE = "tof_cal";
 static const char *CALIBRATION_DONE_KEY = "done";
 static const char *CALIBRATION_VERSION_KEY = "version";
-static const uint32_t CALIBRATION_SCHEMA_VERSION = 8;
+static const uint32_t CALIBRATION_SCHEMA_VERSION = 9;
 static const char *CONTROLLER_NAMESPACE = "ctrl";
 static const char *CONTROLLER_VERSION_KEY = "version";
 static const uint32_t CONTROLLER_SCHEMA_VERSION = 1;
@@ -26,11 +26,14 @@ static const uint32_t CONTROLLER_SAVE_COOLDOWN_MS = 2000;
 static const float CONTROLLER_SAVE_FLOAT_EPSILON = 0.000001f;
 static const char *ADVANCED_NAMESPACE = "advanced";
 static const char *ADVANCED_VERSION_KEY = "version";
-static const uint32_t ADVANCED_SCHEMA_VERSION = 5;
+static const uint32_t ADVANCED_SCHEMA_VERSION = 6;
 static const uint32_t ADVANCED_SAVE_COOLDOWN_MS = 2000;
 static const int PLOT_DEFAULT_MAX_SECONDS = 30;
 static const int PLOT_MIN_MAX_SECONDS = 10;
 static const int PLOT_MAX_MAX_SECONDS = 50;
+static const int MANUAL_ANGLE_DEFAULT_STEP_DEG = 5;
+static const int MANUAL_ANGLE_MIN_STEP_DEG = 1;
+static const int MANUAL_ANGLE_MAX_STEP_DEG = 30;
 
 static WebServer server(80);
 static TaskHandle_t web_task_handle = nullptr;
@@ -74,9 +77,12 @@ struct TofCalibrationDraft {
 };
 
 struct ServoCalibrationDraft {
-  int min_angle = SERVO_CMD_MIN_DEG;
-  int max_angle = SERVO_CMD_MAX_DEG;
-  int neutral_angle = SERVO_CMD_NEUTRAL_DEG;
+  int theoretical_min_angle = SERVO_CMD_MIN_DEG;
+  int theoretical_max_angle = SERVO_CMD_MAX_DEG;
+  int limit_min_angle = SERVO_CMD_MIN_DEG;
+  int limit_max_angle = SERVO_CMD_MAX_DEG;
+  int neutral_offset_us = 0;
+  int pwm_step_us = SERVO_CMD_DEFAULT_PWM_STEP_US;
 };
 
 struct NoiseCalibrationDraft {
@@ -110,6 +116,7 @@ static uint32_t last_controller_save_request_ms = 0;
 static uint32_t last_advanced_save_request_ms = 0;
 static uint32_t last_client_mode_update_ms = 0;
 static int plot_max_seconds = PLOT_DEFAULT_MAX_SECONDS;
+static int manual_angle_step_deg = MANUAL_ANGLE_DEFAULT_STEP_DEG;
 static bool web_client_present = false;
 static bool auto_stabilization_without_client = false;
 static bool client_mode_initialized = false;
@@ -143,8 +150,9 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 .saveRow{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}.saveBtn{border:3px solid var(--line);background:#f8f5ea;font-weight:900;font-size:16px;padding:8px 12px}
 label{font-weight:800}.field{height:38px;border:3px solid var(--line);background:white;font-size:18px;padding:3px 8px;width:100%}
 .stabHeader{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:24px;font-weight:800}.toggle{min-width:46px;height:38px;border:3px solid var(--line);background:#f8f5ea;font-size:24px;font-weight:900;padding:0 10px}
-.manualTitle{text-align:center;font-size:22px;font-weight:800;text-decoration:underline;margin:8px 0}.sliderRow{display:grid;grid-template-columns:34px 1fr 46px;gap:10px;align-items:center}
-input[type=range]{width:100%;accent-color:#111}.small{font-size:13px;color:var(--muted);margin-top:8px}.status{display:flex;gap:16px;flex-wrap:wrap;font-size:14px;color:var(--muted)}
+.manualTitle{text-align:center;font-size:22px;font-weight:800;text-decoration:underline;margin:8px 0}.manualRow{display:grid;grid-template-columns:52px 7rem 52px;gap:10px;justify-content:center;align-items:center}
+.manualBtn{width:52px;height:52px;border:3px solid var(--line);background:#f8f5ea;font-size:30px;font-weight:900;padding:0}.angleBox{height:52px;border:3px solid var(--line);background:white;display:grid;place-items:center;font-size:28px;font-weight:900}
+.small{font-size:13px;color:var(--muted);margin-top:8px}.status{display:flex;gap:16px;flex-wrap:wrap;font-size:14px;color:var(--muted)}
 button{cursor:pointer}button:disabled,input:disabled{opacity:.5;cursor:not-allowed}
 @media(max-width:800px){.grid,.controls{grid-template-columns:1fr}.sceneWrap{height:34vh}.plotBox{height:240px}}
 </style>
@@ -189,7 +197,7 @@ button{cursor:pointer}button:disabled,input:disabled{opacity:.5;cursor:not-allow
     <div class="panel">
       <div class="stabHeader"><span>Stabilization</span><button class="toggle" id="stabToggle">▶</button></div>
       <div class="manualTitle">Manual Ctrl</div>
-      <div class="sliderRow"><span>0</span><input id="manualSlider" type="range" min="0" max="180" step="1"><span>180</span></div>
+      <div class="manualRow"><button class="manualBtn" id="manualMinusBtn">-</button><div class="angleBox" id="manualAngleTxt">--</div><button class="manualBtn" id="manualPlusBtn">+</button></div>
       <div class="saveRow"><button class="saveBtn" id="neutralBtn">Neutral pos</button></div>
       <div class="small">Servo: <b id="servoTxt">--</b> deg | table display angle: <b id="tableTxt">--</b> deg</div>
       <div class="status">
@@ -209,11 +217,11 @@ const scenePause=document.getElementById('scenePause'), plotToggle=document.getE
 const toast=document.getElementById('toast');
 const settingsBtn=document.getElementById('settingsBtn'), settingsMenu=document.getElementById('settingsMenu'), calibrateBtn=document.getElementById('calibrateBtn'), calibrateServoBtn=document.getElementById('calibrateServoBtn'), advancedBtn=document.getElementById('advancedBtn');
 const anglePause=document.getElementById('anglePause'), posPause=document.getElementById('posPause'), speedPause=document.getElementById('speedPause');
-const stabToggle=document.getElementById('stabToggle'), manualSlider=document.getElementById('manualSlider');
+const stabToggle=document.getElementById('stabToggle'), manualMinusBtn=document.getElementById('manualMinusBtn'), manualPlusBtn=document.getElementById('manualPlusBtn'), manualAngleTxt=document.getElementById('manualAngleTxt');
 const refInput=document.getElementById('refInput'), kpInput=document.getElementById('kpInput'), kiInput=document.getElementById('kiInput'), kdInput=document.getElementById('kdInput');
 const saveValuesBtn=document.getElementById('saveValuesBtn'), resetValuesBtn=document.getElementById('resetValuesBtn'), neutralBtn=document.getElementById('neutralBtn'), saveStatus=document.getElementById('saveStatus');
 const servoTxt=document.getElementById('servoTxt'), tableTxt=document.getElementById('tableTxt'), xTxt=document.getElementById('xTxt'), vTxt=document.getElementById('vTxt'), d1Txt=document.getElementById('d1Txt'), d2Txt=document.getElementById('d2Txt');
-let state={x:-1,v:0,speed_valid:false,servo_angle:90,stabilization:true,kp:0,ki:0,kd:0,ref:150,d1:-1,d2:-1,servo_min:0,servo_max:180,servo_neutral:90};
+let state={x:-1,v:0,speed_valid:false,servo_angle:90,stabilization:true,kp:0,ki:0,kd:0,ref:150,d1:-1,d2:-1,servo_min:0,servo_max:180,servo_neutral:90,servo_theoretical_min:0,servo_theoretical_max:180,manual_angle_step:5};
 let sceneFrozen=false, plotRunning=false, continuousPlot=false, angleFrozen=false, posFrozen=false, speedFrozen=false, plotStart=0, angleData=[], posData=[], speedData=[], lastStab=true, editing=false, neutralTimer=null;
 let toastTimer=null;
 function notify(msg){if(!toast)return;toast.textContent=msg;toast.style.display='block';if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(()=>toast.style.display='none',2600)}
@@ -224,9 +232,8 @@ const c=scene.getContext('2d'),w=scene.width,h=scene.height;
 c.clearRect(0,0,w,h);
 c.lineWidth=4;c.strokeStyle='#171717';c.fillStyle='#171717';
 const cx=w*.5,cy=h*.58,len=w*.68;
-const tableDeg=state.servo_angle/2;
-const slopeDeg=45-tableDeg;
-const a=slopeDeg*Math.PI/180;
+const tableDeg=state.servo_angle-state.servo_neutral;
+const a=(-tableDeg)*Math.PI/180;
 const ux=Math.cos(a),uy=Math.sin(a);
 const nx=uy,ny=-ux;
 const x1=cx-ux*len/2,y1=cy-uy*len/2,x2=cx+ux*len/2,y2=cy+uy*len/2;
@@ -259,6 +266,11 @@ if(label==='speed'){
   ymax=Math.ceil(maxAbs/50)*50;
   ymin=-ymax;
 }
+else if(label==='angle'){
+  ymin=Number.isFinite(Number(state.servo_theoretical_min))?Number(state.servo_theoretical_min):0;
+  ymax=Number.isFinite(Number(state.servo_theoretical_max))?Number(state.servo_theoretical_max):180;
+  if(ymax<=ymin){ymin=0;ymax=180}
+}
 else if(vals.length&&label!=='pos'){
   ymin=Math.min(0,...vals)-5;
   ymax=Math.max(90,...vals)+5;
@@ -278,7 +290,7 @@ function dashedRef(value,text){
   c.font=`${Math.max(11,w*.021)}px Arial`;
   c.fillText(text,p+8,y-6);
 }
-if(label==='angle')dashedRef(45,'neutral 45 deg');
+if(label==='angle')dashedRef(state.servo_neutral||90,`neutral ${state.servo_neutral||90} deg`);
 if(label==='pos')dashedRef(state.ref,`x0 ${state.ref} mm`);
 if(label==='speed')dashedRef(0,'0 mm/s');
 c.strokeStyle=color;c.lineWidth=4;c.beginPath();
@@ -299,16 +311,17 @@ if(label==='speed'&&vals.length){
 }
 }
 function drawAll(){if(!sceneFrozen)drawScene();if(!angleFrozen)drawPlot(anglePlot,angleData,'#c43131','angle',false);if(!posFrozen)drawPlot(posPlot,posData,'#2457b8','pos',false);if(!speedFrozen)drawPlot(speedPlot,speedData,'#208444','speed',false)}
-function updateTexts(){if(state.stabilization&&neutralTimer){clearInterval(neutralTimer);neutralTimer=null}servoTxt.textContent=state.servo_angle;tableTxt.textContent=(state.servo_angle/2).toFixed(1);xTxt.textContent=state.x>=0?state.x:'--';vTxt.textContent=state.speed_valid?state.v:'--';d1Txt.textContent=state.d1>=0?state.d1:'--';d2Txt.textContent=state.d2>=0?state.d2:'--';stabToggle.textContent=state.stabilization?'||':'▶';manualSlider.min=state.servo_min||0;manualSlider.max=state.servo_max||180;manualSlider.disabled=state.stabilization;neutralBtn.disabled=state.stabilization;if(!editing){refInput.value=state.ref;kpInput.value=Number(state.kp).toFixed(3);kiInput.value=Number(state.ki).toFixed(3);kdInput.value=Number(state.kd).toFixed(3)}if(lastStab&&!state.stabilization)manualSlider.value=state.servo_angle;lastStab=state.stabilization}
+function updateTexts(){if(state.stabilization&&neutralTimer){clearInterval(neutralTimer);neutralTimer=null}servoTxt.textContent=state.servo_angle;manualAngleTxt.textContent=state.servo_angle;tableTxt.textContent=(state.servo_angle-state.servo_neutral).toFixed(1);xTxt.textContent=state.x>=0?state.x:'--';vTxt.textContent=state.speed_valid?state.v:'--';d1Txt.textContent=state.d1>=0?state.d1:'--';d2Txt.textContent=state.d2>=0?state.d2:'--';stabToggle.textContent=state.stabilization?'||':'▶';manualMinusBtn.disabled=state.stabilization;manualPlusBtn.disabled=state.stabilization;neutralBtn.disabled=state.stabilization;if(!editing){refInput.value=state.ref;kpInput.value=Number(state.kp).toFixed(3);kiInput.value=Number(state.ki).toFixed(3);kdInput.value=Number(state.kd).toFixed(3)}lastStab=state.stabilization}
 function trimContinuousData(t){const minT=Math.max(0,t-PLOT_MAX_S);angleData=angleData.filter(d=>d.t>=minT);posData=posData.filter(d=>d.t>=minT);speedData=speedData.filter(d=>d.t>=minT)}
-async function fetchState(){try{const r=await fetch('/api/state',{cache:'no-store'});state=await r.json();TABLE_LEN_MM=state.table_length||290;PLOT_MAX_S=state.plot_max_s||30;updateTexts();if(plotRunning){const t=(performance.now()-plotStart)/1000;if(t<=PLOT_MAX_S||continuousPlot){angleData.push({t,y:state.servo_angle/2});posData.push({t,y:state.x>=0?state.x:NaN});speedData.push({t,y:state.speed_valid?state.v:NaN});if(continuousPlot)trimContinuousData(t);plotInfo.textContent=`Plot running: ${t.toFixed(1)} s / ${PLOT_MAX_S} s${continuousPlot?' continuous':''}`}else{plotRunning=false;plotToggle.textContent='Go';plotInfo.textContent=`${PLOT_MAX_S} s reached. Plot stopped.`}}drawAll()}catch(e){}}
+async function fetchState(){try{const r=await fetch('/api/state',{cache:'no-store'});state=await r.json();TABLE_LEN_MM=state.table_length||290;PLOT_MAX_S=state.plot_max_s||30;updateTexts();if(plotRunning){const t=(performance.now()-plotStart)/1000;if(t<=PLOT_MAX_S||continuousPlot){angleData.push({t,y:state.servo_angle});posData.push({t,y:state.x>=0?state.x:NaN});speedData.push({t,y:state.speed_valid?state.v:NaN});if(continuousPlot)trimContinuousData(t);plotInfo.textContent=`Plot running: ${t.toFixed(1)} s / ${PLOT_MAX_S} s${continuousPlot?' continuous':''}`}else{plotRunning=false;plotToggle.textContent='Go';plotInfo.textContent=`${PLOT_MAX_S} s reached. Plot stopped.`}}drawAll()}catch(e){}}
 function startPlot(){angleData=[];posData=[];speedData=[];plotStart=performance.now();plotRunning=true;angleFrozen=false;posFrozen=false;speedFrozen=false;plotToggle.textContent='Stop';plotInfo.textContent='Plot running'}
 function stopPlot(){plotRunning=false;plotToggle.textContent='Go';plotInfo.textContent='Plot frozen. Press Go to restart from 0.'}
 plotToggle.onclick=()=>plotRunning?stopPlot():startPlot();scenePause.onclick=()=>{sceneFrozen=!sceneFrozen;scenePause.textContent=sceneFrozen?'▶':'||'};anglePause.onclick=()=>{angleFrozen=!angleFrozen;anglePause.textContent=angleFrozen?'▶':'||'};posPause.onclick=()=>{posFrozen=!posFrozen;posPause.textContent=posFrozen?'▶':'||'};speedPause.onclick=()=>{speedFrozen=!speedFrozen;speedPause.textContent=speedFrozen?'▶':'||'};
 continuousPlotBtn.onclick=()=>{continuousPlot=!continuousPlot;continuousPlotBtn.classList.toggle('active',continuousPlot);if(plotRunning){plotInfo.textContent=continuousPlot?'Continuous plot enabled.':'Continuous plot disabled.'}};
-stabToggle.onclick=async()=>{const en=state.stabilization?0:1;await fetch(`/api/control?stabilization=${en}`,{cache:'no-store'});if(!en)manualSlider.value=state.servo_angle;fetchState()};
-manualSlider.oninput=()=>{servoTxt.textContent=manualSlider.value;tableTxt.textContent=(Number(manualSlider.value)/2).toFixed(1)};
-manualSlider.onchange=()=>{fetch(`/api/control?angle=${manualSlider.value}`,{cache:'no-store'}).then(fetchState)};
+stabToggle.onclick=async()=>{const en=state.stabilization?0:1;await fetch(`/api/control?stabilization=${en}`,{cache:'no-store'});fetchState()};
+async function setManualAngle(angle){angle=Math.max(Number(state.servo_min||0),Math.min(Number(state.servo_max||180),Math.round(angle)));manualAngleTxt.textContent=angle;servoTxt.textContent=angle;tableTxt.textContent=(angle-Number(state.servo_neutral||90)).toFixed(1);await fetch(`/api/control?angle=${angle}`,{cache:'no-store'});fetchState()}
+manualMinusBtn.onclick=()=>{if(!state.stabilization)setManualAngle(Number(state.servo_angle||state.servo_neutral||90)-Number(state.manual_angle_step||5))};
+manualPlusBtn.onclick=()=>{if(!state.stabilization)setManualAngle(Number(state.servo_angle||state.servo_neutral||90)+Number(state.manual_angle_step||5))};
 [refInput,kpInput,kiInput,kdInput].forEach(el=>{el.onfocus=()=>editing=true;el.onblur=()=>editing=false;el.onchange=()=>{const q=`ref=${refInput.value}&kp=${kpInput.value}&ki=${kiInput.value}&kd=${kdInput.value}`;fetch(`/api/params?${q}`,{cache:'no-store'}).then(r=>{if(!r.ok)notify('Modification invalide.');fetchState()}).catch(()=>notify('Erreur reseau.'))}});
 settingsBtn.onclick=()=>settingsMenu.classList.toggle('open');
 calibrateBtn.onclick=()=>{location.href='/calibration_select'};
@@ -324,12 +337,12 @@ resetValuesBtn.onclick=async()=>{saveStatus.textContent='Resetting...';try{await
 neutralBtn.onclick=()=>{
   if(state.stabilization)return;
   if(neutralTimer)clearInterval(neutralTimer);
-  const start=Number(manualSlider.value||state.servo_angle),target=Number(state.servo_neutral||90),duration=900,period=45,t0=performance.now();
+  const start=Number(state.servo_angle),target=Number(state.servo_neutral||90),duration=900,period=45,t0=performance.now();
   neutralBtn.disabled=true;
   neutralTimer=setInterval(()=>{
     const u=Math.min(1,(performance.now()-t0)/duration);
     const angle=Math.round(start+(target-start)*u);
-    manualSlider.value=angle;servoTxt.textContent=angle;tableTxt.textContent=(angle/2).toFixed(1);
+    manualAngleTxt.textContent=angle;servoTxt.textContent=angle;tableTxt.textContent=(angle-Number(state.servo_neutral||90)).toFixed(1);
     fetch(`/api/control?angle=${angle}`,{cache:'no-store'});
     if(u>=1){clearInterval(neutralTimer);neutralTimer=null;fetchState()}
   },period);
@@ -438,9 +451,10 @@ button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:18p
 <label>Lost ball iter [cycles]</label><input id="lostIter" type="number" min="1" max="20" step="1">
 </div></section>
 <section class="panel"><h1>Servo</h1><div class="form">
-<label>Min angle [deg]</label><input id="servoMin" type="number" min="0" max="180" step="1">
-<label>Max angle [deg]</label><input id="servoMax" type="number" min="0" max="180" step="1">
-<label>Neutral angle [deg]</label><input id="servoNeutral" type="number" min="0" max="180" step="1">
+<label>Min allowed angle [deg]</label><input id="servoMin" type="number" min="0" max="180" step="1">
+<label>Max allowed angle [deg]</label><input id="servoMax" type="number" min="0" max="180" step="1">
+<label>Step increment servomotor [us]</label><input id="servoStep" type="number" min="1" max="100" step="1">
+<label>Manual angle step [deg]</label><input id="manualStep" type="number" min="1" max="30" step="1">
 </div></section>
 <section class="panel"><h1>Geometry</h1><div class="form">
 <label>Table length [mm]</label><input id="tableLen" type="number" min="1" max="300" step="1">
@@ -458,26 +472,28 @@ button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:18p
 </div>
 <div class="toast" id="toast"></div>
 <script>
-const ids=['maxSpeed','abMinAlpha','abMaxAlpha','abMinBeta','abMaxBeta','ctrlPeriod','maxStep','posDb','speedDb','lostDelay','lostIter','servoMin','servoMax','servoNeutral','tableLen','plotMax'];
+const ids=['maxSpeed','abMinAlpha','abMaxAlpha','abMinBeta','abMaxBeta','ctrlPeriod','maxStep','posDb','speedDb','lostDelay','lostIter','servoMin','servoMax','servoStep','manualStep','tableLen','plotMax'];
 const el=Object.fromEntries(ids.map(id=>[id,document.getElementById(id)]));
 const statusEl=document.getElementById('status');
 const saveBtn=document.getElementById('saveBtn');
 const toast=document.getElementById('toast');let toastTimer=null;
 function notify(msg){toast.textContent=msg;toast.style.display='block';if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(()=>toast.style.display='none',3000)}
-function fill(s){el.maxSpeed.value=s.max_control_speed;el.abMinAlpha.value=Number(s.alpha_beta_min_alpha).toFixed(2);el.abMaxAlpha.value=Number(s.alpha_beta_max_alpha).toFixed(2);el.abMinBeta.value=Number(s.alpha_beta_min_beta).toFixed(2);el.abMaxBeta.value=Number(s.alpha_beta_max_beta).toFixed(2);el.ctrlPeriod.value=s.controller_period;el.maxStep.value=s.max_step;el.posDb.value=s.position_deadband;el.speedDb.value=s.speed_deadband;el.lostDelay.value=(Number(s.lost_delay)/1000).toFixed(1);el.lostIter.value=s.lost_iter;el.servoMin.value=s.servo_min;el.servoMax.value=s.servo_max;el.servoNeutral.value=s.servo_neutral;el.tableLen.value=s.table_length;el.plotMax.value=s.plot_max_s}
+function fill(s){el.maxSpeed.value=s.max_control_speed;el.abMinAlpha.value=Number(s.alpha_beta_min_alpha).toFixed(2);el.abMaxAlpha.value=Number(s.alpha_beta_max_alpha).toFixed(2);el.abMinBeta.value=Number(s.alpha_beta_min_beta).toFixed(2);el.abMaxBeta.value=Number(s.alpha_beta_max_beta).toFixed(2);el.ctrlPeriod.value=s.controller_period;el.maxStep.value=s.max_step;el.posDb.value=s.position_deadband;el.speedDb.value=s.speed_deadband;el.lostDelay.value=(Number(s.lost_delay)/1000).toFixed(1);el.lostIter.value=s.lost_iter;el.servoMin.value=s.servo_min;el.servoMax.value=s.servo_max;el.servoStep.value=s.servo_step_us;el.manualStep.value=s.manual_angle_step;el.tableLen.value=s.table_length;el.plotMax.value=s.plot_max_s}
 async function load(){try{const r=await fetch('/api/advanced',{cache:'no-store'});fill(await r.json())}catch(e){statusEl.textContent='Load failed.'}}
-function query(){return `max_speed=${el.maxSpeed.value}&ab_min_alpha=${el.abMinAlpha.value}&ab_max_alpha=${el.abMaxAlpha.value}&ab_min_beta=${el.abMinBeta.value}&ab_max_beta=${el.abMaxBeta.value}&ctrl_period=${el.ctrlPeriod.value}&max_step=${el.maxStep.value}&pos_db=${el.posDb.value}&speed_db=${el.speedDb.value}&lost_delay=${Math.round(Number(el.lostDelay.value)*1000)}&lost_iter=${el.lostIter.value}&servo_min=${el.servoMin.value}&servo_max=${el.servoMax.value}&servo_neutral=${el.servoNeutral.value}&table_len=${el.tableLen.value}&plot_max=${el.plotMax.value}`}
+function query(){return `max_speed=${el.maxSpeed.value}&ab_min_alpha=${el.abMinAlpha.value}&ab_max_alpha=${el.abMaxAlpha.value}&ab_min_beta=${el.abMinBeta.value}&ab_max_beta=${el.abMaxBeta.value}&ctrl_period=${el.ctrlPeriod.value}&max_step=${el.maxStep.value}&pos_db=${el.posDb.value}&speed_db=${el.speedDb.value}&lost_delay=${Math.round(Number(el.lostDelay.value)*1000)}&lost_iter=${el.lostIter.value}&servo_min=${el.servoMin.value}&servo_max=${el.servoMax.value}&servo_step=${el.servoStep.value}&manual_step=${el.manualStep.value}&table_len=${el.tableLen.value}&plot_max=${el.plotMax.value}`}
 function num(id){return Number(el[id].value)}
 function inRange(v,min,max){return Number.isFinite(v)&&v>=min&&v<=max}
 function validateAdvanced(){
-  const sm=num('servoMin'),sx=num('servoMax'),sn=num('servoNeutral');
+  const sm=num('servoMin'),sx=num('servoMax');
   if(!inRange(num('maxSpeed'),0,2000))return 'La vitesse max utilisee par le controleur doit etre entre 0 et 2000 mm/s.';
   if(!inRange(num('abMinAlpha'),0,1)||!inRange(num('abMaxAlpha'),0,1)||num('abMinAlpha')>num('abMaxAlpha'))return 'Alpha invalide: 0 <= min <= max <= 1.';
   if(!inRange(num('abMinBeta'),0,2)||!inRange(num('abMaxBeta'),0,2)||num('abMinBeta')>num('abMaxBeta'))return 'Beta invalide: 0 <= min <= max <= 2.';
   if(!inRange(num('ctrlPeriod'),10,100))return 'La periode du controleur doit etre entre 10 et 100 ms.';
   if(!inRange(num('maxStep'),0,180)||!inRange(num('posDb'),0,50)||!inRange(num('speedDb'),0,300))return 'Parametre PID hors limites.';
   if(!inRange(num('lostDelay'),0,10)||!inRange(num('lostIter'),1,20))return 'Parametre de balle perdue hors limites.';
-  if(!inRange(sm,0,180)||!inRange(sx,0,180)||sm>=sx||sn<sm||sn>sx)return 'Angles servo invalides: min < max et neutre dans la plage 0-180 deg.';
+  if(!inRange(sm,0,180)||!inRange(sx,0,180)||sm>=sx)return 'Angles servo invalides: min < max dans la plage 0-180 deg.';
+  if(!inRange(num('servoStep'),1,100))return 'Le pas servo doit etre entre 1 et 100 us.';
+  if(!inRange(num('manualStep'),1,30))return 'Le pas manuel doit etre entre 1 et 30 deg.';
   if(!inRange(num('tableLen'),1,300))return 'La longueur de table doit etre entre 1 et 300 mm.';
   if(!inRange(num('plotMax'),10,50))return 'Le temps de plot doit etre entre 10 et 50 s.';
   return '';
@@ -503,6 +519,7 @@ body{margin:0;min-height:100vh;background:#f4f1e8;color:#171717;font-family:Aria
 .app{width:min(920px,100%);margin:0 auto;display:grid;gap:12px}.panel{background:#fffdf6;border:3px solid #202020;border-radius:4px;padding:16px}
 .scene{height:330px}.scene canvas{width:100%;height:100%;display:block}h1{font-size:27px;margin:0 0 10px}.msg{font-size:18px;line-height:1.4;color:#555}
 .form{display:grid;grid-template-columns:1fr 160px;gap:10px;align-items:center}label{font-weight:800}input{height:42px;border:3px solid #202020;background:white;font-size:20px;padding:4px 8px;width:100%}
+.pwmRow{display:grid;grid-template-columns:52px 7rem 52px;gap:10px;justify-content:center;align-items:center;margin:14px 0}.pwmBtn{width:52px;height:52px;padding:0;font-size:30px}.pwmBox{height:52px;border:3px solid #202020;background:white;display:grid;place-items:center;font-size:28px;font-weight:900}
 .row{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}.small{font-size:14px;color:#666}
 button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:20px;font-weight:900;padding:10px 18px;cursor:pointer;text-decoration:none;text-align:center}button:disabled{opacity:.55;cursor:wait}
 .toast{position:fixed;right:14px;bottom:14px;max-width:min(420px,calc(100vw - 28px));background:#171717;color:#fffdf6;border:3px solid #202020;padding:10px 14px;font-weight:800;z-index:20;display:none}
@@ -514,13 +531,22 @@ button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:20p
 <section class="panel scene"><canvas id="scene"></canvas></section>
 <section class="panel">
 <h1>Calibration du servomoteur</h1>
-<p class="msg">Entrez les angles reels correspondant aux impulsions 1000 us et 2000 us. L'angle neutre sera la moyenne des deux valeurs. Si vous ne changez rien, les valeurs par defaut seront conservees.</p>
-<div class="form">
-<label for="minInput">Angle reel a 1000 us</label><input id="minInput" type="number" min="0" max="180" step="1">
-<label for="maxInput">Angle reel a 2000 us</label><input id="maxInput" type="number" min="0" max="180" step="1">
+<p class="msg">Placez le servo a 1500 us, vissez la mecanique au plus proche de l'horizontale, puis ajustez le PWM et enregistrez l'offset.</p>
+<div class="pwmRow">
+<button class="pwmBtn" id="minusBtn">-</button>
+<div class="pwmBox" id="pwmTxt">1500</div>
+<button class="pwmBtn" id="plusBtn">+</button>
 </div>
-<p class="small">Neutre calcule: <b id="neutralTxt">--</b> deg | Servo: <b id="servoTxt">--</b> deg</p>
+<div class="form">
+<label for="minInput">Angle a 1000 us</label><input id="minInput" type="number" min="0" max="180" step="1">
+<label for="maxInput">Angle a 2000 us</label><input id="maxInput" type="number" min="0" max="180" step="1">
+<label for="limitMinInput">Min allowed angle</label><input id="limitMinInput" type="number" min="0" max="180" step="1">
+<label for="limitMaxInput">Max allowed angle</label><input id="limitMaxInput" type="number" min="0" max="180" step="1">
+</div>
+<p class="small">Neutre logique: <b id="neutralTxt">--</b> deg | Offset: <b id="offsetTxt">--</b> us | Servo: <b id="servoTxt">--</b> deg</p>
 <div class="row">
+<button id="neutralBtn">Neutral pos</button>
+<button id="offsetBtn">Set pos offset</button>
 <button id="animateBtn">Animate</button>
 <button id="saveBtn">Valider servo</button>
 <a id="cancelBtn" href="/">Cancel</a>
@@ -530,31 +556,32 @@ button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:20p
 </div>
 <div class="toast" id="toast"></div>
 <script>
-const scene=document.getElementById('scene'),minInput=document.getElementById('minInput'),maxInput=document.getElementById('maxInput'),neutralTxt=document.getElementById('neutralTxt'),servoTxt=document.getElementById('servoTxt'),statusEl=document.getElementById('status');
-const animateBtn=document.getElementById('animateBtn'),saveBtn=document.getElementById('saveBtn'),cancelBtn=document.getElementById('cancelBtn');
+const scene=document.getElementById('scene'),minInput=document.getElementById('minInput'),maxInput=document.getElementById('maxInput'),limitMinInput=document.getElementById('limitMinInput'),limitMaxInput=document.getElementById('limitMaxInput'),neutralTxt=document.getElementById('neutralTxt'),offsetTxt=document.getElementById('offsetTxt'),servoTxt=document.getElementById('servoTxt'),pwmTxt=document.getElementById('pwmTxt'),statusEl=document.getElementById('status');
+const minusBtn=document.getElementById('minusBtn'),plusBtn=document.getElementById('plusBtn'),neutralBtn=document.getElementById('neutralBtn'),offsetBtn=document.getElementById('offsetBtn'),animateBtn=document.getElementById('animateBtn'),saveBtn=document.getElementById('saveBtn'),cancelBtn=document.getElementById('cancelBtn');
 const toast=document.getElementById('toast');let toastTimer=null;
-const params=new URLSearchParams(location.search);let st={min_angle:0,max_angle:180,neutral_angle:90,current_angle:90};let started=false,animating=false;
+const params=new URLSearchParams(location.search);let st={theoretical_min_angle:0,theoretical_max_angle:180,limit_min_angle:0,limit_max_angle:180,neutral_angle:90,current_angle:90,current_pwm_us:1500,neutral_offset_us:0,pwm_step_us:10};let started=false,animating=false;
 function notify(msg){toast.textContent=msg;toast.style.display='block';if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(()=>toast.style.display='none',3000)}
 function fit(c){const r=c.getBoundingClientRect(),d=window.devicePixelRatio||1;const w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));if(c.width!==w||c.height!==h){c.width=w;c.height=h}}
 function neutralFromInputs(){const mn=Number(minInput.value||0),mx=Number(maxInput.value||180);return Math.round((mn+mx)/2)}
-function displayAngle(){return Number(st.current_angle||neutralFromInputs())/2}
+function displayAngle(){return Number(st.current_angle||neutralFromInputs())-neutralFromInputs()}
 function draw(){
 fit(scene);const c=scene.getContext('2d'),w=scene.width,h=scene.height;c.clearRect(0,0,w,h);c.lineWidth=4;c.strokeStyle='#171717';c.fillStyle='#171717';
-const cx=w*.5,cy=h*.56,len=w*.72,tableDeg=displayAngle(),slopeDeg=45-tableDeg,a=slopeDeg*Math.PI/180,ux=Math.cos(a),uy=Math.sin(a);
+const cx=w*.5,cy=h*.56,len=w*.72,tableDeg=displayAngle(),a=(-tableDeg)*Math.PI/180,ux=Math.cos(a),uy=Math.sin(a);
 const x1=cx-ux*len/2,y1=cy-uy*len/2,x2=cx+ux*len/2,y2=cy+uy*len/2;
 c.beginPath();c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke();
 c.beginPath();c.moveTo(cx,cy+8);c.lineTo(cx-w*.035,cy+h*.22);c.lineTo(cx+w*.035,cy+h*.22);c.closePath();c.stroke();
 c.font=`${Math.max(14,w*.018)}px Arial`;c.fillText(`servo=${st.current_angle} deg / table=${tableDeg.toFixed(1)} deg`,18,h-22);
 }
-function syncInputs(){minInput.value=st.min_angle;maxInput.value=st.max_angle;neutralTxt.textContent=neutralFromInputs();servoTxt.textContent=st.current_angle;draw()}
+function syncInputs(){minInput.value=st.theoretical_min_angle;maxInput.value=st.theoretical_max_angle;limitMinInput.value=st.limit_min_angle;limitMaxInput.value=st.limit_max_angle;neutralTxt.textContent=neutralFromInputs();offsetTxt.textContent=st.neutral_offset_us;pwmTxt.textContent=st.current_pwm_us;servoTxt.textContent=st.current_angle;draw()}
 async function start(){if(started)return;started=true;const mode=params.get('initial')==='1'?'initial':'manual';await fetch('/api/servo_calibration/action?cmd=start&mode='+mode,{cache:'no-store'})}
 async function load(){try{await start();const r=await fetch('/api/servo_calibration/state',{cache:'no-store'});st=await r.json();syncInputs();statusEl.textContent=st.error||'Pret.'}catch(e){statusEl.textContent='Erreur reseau'}}
 async function setAngle(angle){st.current_angle=angle;servoTxt.textContent=angle;draw();await fetch('/api/servo_calibration/action?cmd=angle&value='+angle,{cache:'no-store'})}
+async function setPwm(pwm){pwm=Math.max(1000,Math.min(2000,Math.round(pwm)));st.current_pwm_us=pwm;pwmTxt.textContent=pwm;await fetch('/api/servo_calibration/action?cmd=pwm&value='+pwm,{cache:'no-store'});load()}
 async function animateSegment(from,to,duration=900){const t0=performance.now(),period=35;return new Promise(resolve=>{const timer=setInterval(async()=>{const u=Math.min(1,(performance.now()-t0)/duration);const a=Math.round(from+(to-from)*u);setAngle(a);if(u>=1){clearInterval(timer);resolve()}},period)})}
 animateBtn.onclick=async()=>{
  if(animating)return;animating=true;animateBtn.disabled=saveBtn.disabled=true;statusEl.textContent='Animation...';
- const mn=Number(minInput.value||0),mx=Number(maxInput.value||180),neu=neutralFromInputs();
- const pr=await fetch(`/api/servo_calibration/action?cmd=preview&min=${mn}&max=${mx}`,{cache:'no-store'});
+ const mn=Number(minInput.value||0),mx=Number(maxInput.value||180),lmn=Number(limitMinInput.value||mn),lmx=Number(limitMaxInput.value||mx),neu=neutralFromInputs();
+ const pr=await fetch(`/api/servo_calibration/action?cmd=preview&min=${mn}&max=${mx}&limit_min=${lmn}&limit_max=${lmx}&offset=${st.neutral_offset_us}`,{cache:'no-store'});
  const ps=await pr.json();
  if(!ps.ok){statusEl.textContent=ps.error||'Valeurs invalides.';notify(ps.error||'Valeurs servo invalides.');animateBtn.disabled=saveBtn.disabled=false;animating=false;return}
  await animateSegment(st.current_angle,neu,600);await animateSegment(neu,mx,900);await animateSegment(mx,mn,1200);await animateSegment(mn,neu,900);
@@ -562,11 +589,15 @@ animateBtn.onclick=async()=>{
 };
 saveBtn.onclick=async()=>{
  saveBtn.disabled=true;statusEl.textContent='Validation...';
- const mn=Number(minInput.value||0),mx=Number(maxInput.value||180);
- try{const r=await fetch(`/api/servo_calibration/action?cmd=save&min=${mn}&max=${mx}`,{cache:'no-store'});st=await r.json();syncInputs();if(st.ok){statusEl.textContent='Servo valide.';setTimeout(()=>{location.href=params.get('initial')==='1'?'/calibration?after_servo=1':'/'},500)}else{statusEl.textContent=st.error||'Valeurs invalides.';notify(st.error||'Valeurs servo invalides.')}}catch(e){statusEl.textContent='Erreur validation.';notify('Erreur reseau.')}
+ const mn=Number(minInput.value||0),mx=Number(maxInput.value||180),lmn=Number(limitMinInput.value||mn),lmx=Number(limitMaxInput.value||mx);
+ try{const r=await fetch(`/api/servo_calibration/action?cmd=save&min=${mn}&max=${mx}&limit_min=${lmn}&limit_max=${lmx}&offset=${st.neutral_offset_us}&step=${st.pwm_step_us}`,{cache:'no-store'});st=await r.json();syncInputs();if(st.ok){statusEl.textContent='Servo valide.';setTimeout(()=>{location.href=params.get('initial')==='1'?'/calibration?after_servo=1':'/'},500)}else{statusEl.textContent=st.error||'Valeurs invalides.';notify(st.error||'Valeurs servo invalides.')}}catch(e){statusEl.textContent='Erreur validation.';notify('Erreur reseau.')}
  saveBtn.disabled=false;
 };
-[minInput,maxInput].forEach(i=>i.oninput=()=>{neutralTxt.textContent=neutralFromInputs()});
+minusBtn.onclick=()=>setPwm(Number(st.current_pwm_us||1500)-Number(st.pwm_step_us||10));
+plusBtn.onclick=()=>setPwm(Number(st.current_pwm_us||1500)+Number(st.pwm_step_us||10));
+neutralBtn.onclick=()=>setPwm(1500);
+offsetBtn.onclick=async()=>{try{const r=await fetch('/api/servo_calibration/action?cmd=offset',{cache:'no-store'});st=await r.json();syncInputs();statusEl.textContent=st.ok?'Offset pret a sauvegarder.':(st.error||'Offset invalide.')}catch(e){statusEl.textContent='Erreur reseau'}};
+[minInput,maxInput].forEach(i=>i.oninput=()=>{neutralTxt.textContent=neutralFromInputs();draw()});
 cancelBtn.onclick=e=>{if(params.get('initial')==='1'){e.preventDefault();location.href='/'}};
 window.onresize=draw;load();
 </script>
@@ -899,19 +930,39 @@ static void reset_calibration_drafts(void) {
 }
 
 static bool apply_servo_calibration_draft(void) {
-  return set_servo_angle_range(calibration_servo.min_angle,
-                               calibration_servo.max_angle,
-                               calibration_servo.neutral_angle);
+  bool ok = set_servo_theoretical_angle_range(calibration_servo.theoretical_min_angle,
+                                              calibration_servo.theoretical_max_angle);
+  ok = set_servo_neutral_offset_us(calibration_servo.neutral_offset_us) && ok;
+  ok = set_servo_angle_limits(calibration_servo.limit_min_angle,
+                              calibration_servo.limit_max_angle) && ok;
+  return ok;
 }
 
-static bool set_servo_calibration_draft(int min_angle, int max_angle) {
-  if (min_angle < SERVO_CMD_MIN_DEG || max_angle > SERVO_CMD_MAX_DEG || min_angle >= max_angle) {
+static bool set_servo_calibration_draft(int theoretical_min_angle,
+                                        int theoretical_max_angle,
+                                        int limit_min_angle,
+                                        int limit_max_angle,
+                                        int neutral_offset_us) {
+  int neutral_angle = (theoretical_min_angle + theoretical_max_angle + 1) / 2;
+
+  if (theoretical_min_angle < SERVO_CMD_MIN_DEG ||
+      theoretical_max_angle > SERVO_CMD_MAX_DEG ||
+      theoretical_min_angle >= theoretical_max_angle ||
+      limit_min_angle < theoretical_min_angle ||
+      limit_max_angle > theoretical_max_angle ||
+      limit_min_angle >= limit_max_angle ||
+      neutral_angle < limit_min_angle ||
+      neutral_angle > limit_max_angle ||
+      neutral_offset_us < -500 ||
+      neutral_offset_us > 500) {
     return false;
   }
 
-  calibration_servo.min_angle = min_angle;
-  calibration_servo.max_angle = max_angle;
-  calibration_servo.neutral_angle = (min_angle + max_angle + 1) / 2;
+  calibration_servo.theoretical_min_angle = theoretical_min_angle;
+  calibration_servo.theoretical_max_angle = theoretical_max_angle;
+  calibration_servo.limit_min_angle = limit_min_angle;
+  calibration_servo.limit_max_angle = limit_max_angle;
+  calibration_servo.neutral_offset_us = neutral_offset_us;
   return apply_servo_calibration_draft();
 }
 
@@ -920,9 +971,12 @@ static void save_draft_to_preferences(void) {
   prefs.begin(CALIBRATION_NAMESPACE, false);
   prefs.putBool(CALIBRATION_DONE_KEY, true);
   prefs.putUInt(CALIBRATION_VERSION_KEY, CALIBRATION_SCHEMA_VERSION);
-  prefs.putInt("sv_min", calibration_servo.min_angle);
-  prefs.putInt("sv_max", calibration_servo.max_angle);
-  prefs.putInt("sv_neu", calibration_servo.neutral_angle);
+  prefs.putInt("sv_tmin", calibration_servo.theoretical_min_angle);
+  prefs.putInt("sv_tmax", calibration_servo.theoretical_max_angle);
+  prefs.putInt("sv_lmin", calibration_servo.limit_min_angle);
+  prefs.putInt("sv_lmax", calibration_servo.limit_max_angle);
+  prefs.putInt("sv_off", calibration_servo.neutral_offset_us);
+  prefs.putInt("sv_step", calibration_servo.pwm_step_us);
   prefs.putInt("t1_mf", calibration_tof1.meas_fov);
   prefs.putInt("t1_rf", calibration_tof1.real_fov);
   prefs.putInt("t1_m0", calibration_tof1.meas_0);
@@ -949,9 +1003,14 @@ static bool load_draft_from_preferences(void) {
   bool compatible_calibration = done && (version >= 7 && version <= CALIBRATION_SCHEMA_VERSION);
 
   if (compatible_calibration) {
-    calibration_servo.min_angle = prefs.getInt("sv_min", SERVO_CMD_MIN_DEG);
-    calibration_servo.max_angle = prefs.getInt("sv_max", SERVO_CMD_MAX_DEG);
-    calibration_servo.neutral_angle = prefs.getInt("sv_neu", SERVO_CMD_NEUTRAL_DEG);
+    int old_min = prefs.getInt("sv_min", SERVO_CMD_MIN_DEG);
+    int old_max = prefs.getInt("sv_max", SERVO_CMD_MAX_DEG);
+    calibration_servo.theoretical_min_angle = prefs.getInt("sv_tmin", old_min);
+    calibration_servo.theoretical_max_angle = prefs.getInt("sv_tmax", old_max);
+    calibration_servo.limit_min_angle = prefs.getInt("sv_lmin", calibration_servo.theoretical_min_angle);
+    calibration_servo.limit_max_angle = prefs.getInt("sv_lmax", calibration_servo.theoretical_max_angle);
+    calibration_servo.neutral_offset_us = prefs.getInt("sv_off", 0);
+    calibration_servo.pwm_step_us = prefs.getInt("sv_step", SERVO_CMD_DEFAULT_PWM_STEP_US);
     calibration_tof1.meas_fov = prefs.getInt("t1_mf", 145);
     calibration_tof1.real_fov = prefs.getInt("t1_rf", 145);
     calibration_tof1.meas_0 = prefs.getInt("t1_m0", 0);
@@ -981,9 +1040,13 @@ static bool load_draft_from_preferences(void) {
 static void save_servo_calibration_to_preferences(void) {
   Preferences prefs;
   prefs.begin(CALIBRATION_NAMESPACE, false);
-  prefs.putInt("sv_min", calibration_servo.min_angle);
-  prefs.putInt("sv_max", calibration_servo.max_angle);
-  prefs.putInt("sv_neu", calibration_servo.neutral_angle);
+  prefs.putUInt(CALIBRATION_VERSION_KEY, CALIBRATION_SCHEMA_VERSION);
+  prefs.putInt("sv_tmin", calibration_servo.theoretical_min_angle);
+  prefs.putInt("sv_tmax", calibration_servo.theoretical_max_angle);
+  prefs.putInt("sv_lmin", calibration_servo.limit_min_angle);
+  prefs.putInt("sv_lmax", calibration_servo.limit_max_angle);
+  prefs.putInt("sv_off", calibration_servo.neutral_offset_us);
+  prefs.putInt("sv_step", calibration_servo.pwm_step_us);
   prefs.end();
 }
 
@@ -1279,7 +1342,10 @@ static void send_state(void) {
   json += "\"plot_max_s\":" + String(plot_max_seconds) + ",";
   json += "\"servo_min\":" + String(get_servo_min_angle_deg()) + ",";
   json += "\"servo_max\":" + String(get_servo_max_angle_deg()) + ",";
-  json += "\"servo_neutral\":" + String(get_servo_neutral_angle_deg());
+  json += "\"servo_neutral\":" + String(get_servo_neutral_angle_deg()) + ",";
+  json += "\"servo_theoretical_min\":" + String(get_servo_theoretical_min_angle_deg()) + ",";
+  json += "\"servo_theoretical_max\":" + String(get_servo_theoretical_max_angle_deg()) + ",";
+  json += "\"manual_angle_step\":" + String(manual_angle_step_deg);
   json += "}";
 
   server.send(200, "application/json; charset=utf-8", json);
@@ -1307,7 +1373,8 @@ static void send_advanced_state(bool ok = true) {
   json += "\"lost_iter\":" + String(get_controller_lost_ball_iter()) + ",";
   json += "\"servo_min\":" + String(get_servo_min_angle_deg()) + ",";
   json += "\"servo_max\":" + String(get_servo_max_angle_deg()) + ",";
-  json += "\"servo_neutral\":" + String(get_servo_neutral_angle_deg()) + ",";
+  json += "\"servo_step_us\":" + String(calibration_servo.pwm_step_us) + ",";
+  json += "\"manual_angle_step\":" + String(manual_angle_step_deg) + ",";
   json += "\"table_length\":" + String(get_table_length_mm()) + ",";
   json += "\"plot_max_s\":" + String(plot_max_seconds);
   json += "}";
@@ -1363,14 +1430,34 @@ static bool update_advanced_params_from_request(void) {
 
   int servo_min = get_servo_min_angle_deg();
   int servo_max = get_servo_max_angle_deg();
-  int servo_neutral = get_servo_neutral_angle_deg();
 
   if (server.hasArg("servo_min")) servo_min = server.arg("servo_min").toInt();
   if (server.hasArg("servo_max")) servo_max = server.arg("servo_max").toInt();
-  if (server.hasArg("servo_neutral")) servo_neutral = server.arg("servo_neutral").toInt();
-  if (server.hasArg("servo_min") || server.hasArg("servo_max") || server.hasArg("servo_neutral")) {
-    ok = set_servo_angle_range(servo_min, servo_max, servo_neutral) && ok;
+  if (server.hasArg("servo_min") || server.hasArg("servo_max")) {
+    ok = set_servo_angle_limits(servo_min, servo_max) && ok;
+    if(ok) {
+      calibration_servo.limit_min_angle = servo_min;
+      calibration_servo.limit_max_angle = servo_max;
+    }
     reset_controller();
+  }
+
+  if (server.hasArg("servo_step")) {
+    int servo_step = server.arg("servo_step").toInt();
+    if(servo_step < 1 || servo_step > 100) {
+      ok = false;
+    } else {
+      calibration_servo.pwm_step_us = servo_step;
+    }
+  }
+
+  if (server.hasArg("manual_step")) {
+    int manual_step = server.arg("manual_step").toInt();
+    if(manual_step < MANUAL_ANGLE_MIN_STEP_DEG || manual_step > MANUAL_ANGLE_MAX_STEP_DEG) {
+      ok = false;
+    } else {
+      manual_angle_step_deg = manual_step;
+    }
   }
 
   if (server.hasArg("table_len")) {
@@ -1388,6 +1475,10 @@ static void reset_all_advanced_parameters(void) {
   reset_ball_position_advanced_parameters();
   reset_servo_advanced_parameters();
   reset_controller_advanced_parameters();
+  calibration_servo.limit_min_angle = get_servo_min_angle_deg();
+  calibration_servo.limit_max_angle = get_servo_max_angle_deg();
+  calibration_servo.pwm_step_us = SERVO_CMD_DEFAULT_PWM_STEP_US;
+  manual_angle_step_deg = MANUAL_ANGLE_DEFAULT_STEP_DEG;
   plot_max_seconds = PLOT_DEFAULT_MAX_SECONDS;
 }
 
@@ -1420,7 +1511,8 @@ static bool advanced_settings_match_saved(void) {
               prefs.getInt("lost_iter", -1) == get_controller_lost_ball_iter() &&
               prefs.getInt("servo_min", -1) == get_servo_min_angle_deg() &&
               prefs.getInt("servo_max", -1) == get_servo_max_angle_deg() &&
-              prefs.getInt("servo_neutral", -1) == get_servo_neutral_angle_deg() &&
+              prefs.getInt("servo_step", -1) == calibration_servo.pwm_step_us &&
+              prefs.getInt("manual_step", -1) == manual_angle_step_deg &&
               prefs.getInt("table_len", -1) == get_table_length_mm() &&
               prefs.getInt("plot_max", -1) == plot_max_seconds;
 
@@ -1462,15 +1554,15 @@ static bool save_advanced_settings(void) {
   prefs.putInt("lost_iter", get_controller_lost_ball_iter());
   prefs.putInt("servo_min", get_servo_min_angle_deg());
   prefs.putInt("servo_max", get_servo_max_angle_deg());
-  prefs.putInt("servo_neutral", get_servo_neutral_angle_deg());
+  prefs.putInt("servo_step", calibration_servo.pwm_step_us);
+  prefs.putInt("manual_step", manual_angle_step_deg);
   prefs.putInt("table_len", get_table_length_mm());
   prefs.putInt("plot_max", plot_max_seconds);
   prefs.end();
 
   if (distance_sensors_calibrated) {
-    calibration_servo.min_angle = get_servo_min_angle_deg();
-    calibration_servo.max_angle = get_servo_max_angle_deg();
-    calibration_servo.neutral_angle = get_servo_neutral_angle_deg();
+    calibration_servo.limit_min_angle = get_servo_min_angle_deg();
+    calibration_servo.limit_max_angle = get_servo_max_angle_deg();
     save_servo_calibration_to_preferences();
   }
 
@@ -1500,7 +1592,8 @@ static bool load_advanced_settings(void) {
   int lost_iter = prefs.getInt("lost_iter", CONTROLLER_DEFAULT_LOST_BALL_ITER);
   int servo_min = prefs.getInt("servo_min", SERVO_CMD_MIN_DEG);
   int servo_max = prefs.getInt("servo_max", SERVO_CMD_MAX_DEG);
-  int servo_neutral = prefs.getInt("servo_neutral", SERVO_CMD_NEUTRAL_DEG);
+  int servo_step = prefs.getInt("servo_step", SERVO_CMD_DEFAULT_PWM_STEP_US);
+  int manual_step = prefs.getInt("manual_step", MANUAL_ANGLE_DEFAULT_STEP_DEG);
   int table_len = prefs.getInt("table_len", TABLE_LENGTH_DEFAULT_MM);
   int saved_plot_max = prefs.getInt("plot_max", PLOT_DEFAULT_MAX_SECONDS);
   prefs.end();
@@ -1514,7 +1607,17 @@ static bool load_advanced_settings(void) {
   ok = set_controller_stabilization_speed_deadband_mm_s(speed_db) && ok;
   ok = set_controller_lost_ball_delay_ms(lost_delay) && ok;
   ok = set_controller_lost_ball_iter(lost_iter) && ok;
-  ok = set_servo_angle_range(servo_min, servo_max, servo_neutral) && ok;
+  ok = set_servo_angle_limits(servo_min, servo_max) && ok;
+  if(servo_step >= 1 && servo_step <= 100) {
+    calibration_servo.pwm_step_us = servo_step;
+  } else {
+    ok = false;
+  }
+  if(manual_step >= MANUAL_ANGLE_MIN_STEP_DEG && manual_step <= MANUAL_ANGLE_MAX_STEP_DEG) {
+    manual_angle_step_deg = manual_step;
+  } else {
+    ok = false;
+  }
   ok = set_table_length_mm(table_len) && ok;
   ok = set_plot_max_seconds(saved_plot_max) && ok;
   reset_controller();
@@ -1577,10 +1680,15 @@ static void update_web_client_control_mode(void) {
 static void send_servo_calibration_state(bool ok = true) {
   String json = "{";
   json += "\"ok\":" + String(ok ? "true" : "false") + ",";
-  json += "\"min_angle\":" + String(calibration_servo.min_angle) + ",";
-  json += "\"max_angle\":" + String(calibration_servo.max_angle) + ",";
-  json += "\"neutral_angle\":" + String(calibration_servo.neutral_angle) + ",";
+  json += "\"theoretical_min_angle\":" + String(calibration_servo.theoretical_min_angle) + ",";
+  json += "\"theoretical_max_angle\":" + String(calibration_servo.theoretical_max_angle) + ",";
+  json += "\"limit_min_angle\":" + String(calibration_servo.limit_min_angle) + ",";
+  json += "\"limit_max_angle\":" + String(calibration_servo.limit_max_angle) + ",";
+  json += "\"neutral_angle\":" + String(get_servo_neutral_angle_deg()) + ",";
   json += "\"current_angle\":" + String(get_servo_angle()) + ",";
+  json += "\"current_pwm_us\":" + String(get_servo_current_pulse_us()) + ",";
+  json += "\"neutral_offset_us\":" + String(calibration_servo.neutral_offset_us) + ",";
+  json += "\"pwm_step_us\":" + String(calibration_servo.pwm_step_us) + ",";
   json += "\"error\":\"" + calibration_error_msg + "\"";
   json += "}";
 
@@ -1595,12 +1703,14 @@ static void start_servo_calibration(bool initial_mode) {
   if (!initial_mode && load_draft_from_preferences()) {
     apply_servo_calibration_draft();
   } else {
-    calibration_servo.min_angle = get_servo_min_angle_deg();
-    calibration_servo.max_angle = get_servo_max_angle_deg();
-    calibration_servo.neutral_angle = get_servo_neutral_angle_deg();
+    calibration_servo.theoretical_min_angle = get_servo_theoretical_min_angle_deg();
+    calibration_servo.theoretical_max_angle = get_servo_theoretical_max_angle_deg();
+    calibration_servo.limit_min_angle = get_servo_min_angle_deg();
+    calibration_servo.limit_max_angle = get_servo_max_angle_deg();
+    calibration_servo.neutral_offset_us = get_servo_neutral_offset_us();
   }
 
-  set_servo_angle(calibration_servo.neutral_angle);
+  set_servo_calibration_pulse_us(SERVO_CMD_NEUTRAL_PULSE_US);
   reset_controller();
 }
 
@@ -1617,13 +1727,41 @@ static void handle_servo_calibration_action(void) {
   if (cmd == "preview") {
     int min_angle = server.arg("min").toInt();
     int max_angle = server.arg("max").toInt();
+    int limit_min = server.hasArg("limit_min") ? server.arg("limit_min").toInt() : min_angle;
+    int limit_max = server.hasArg("limit_max") ? server.arg("limit_max").toInt() : max_angle;
+    int offset_us = server.hasArg("offset") ? server.arg("offset").toInt() : calibration_servo.neutral_offset_us;
 
-    if (!set_servo_calibration_draft(min_angle, max_angle)) {
+    if (!set_servo_calibration_draft(min_angle, max_angle, limit_min, limit_max, offset_us)) {
       calibration_error_msg = "Angles servo invalides.";
       send_servo_calibration_state(false);
       return;
     }
 
+    send_servo_calibration_state();
+    return;
+  }
+
+  if (cmd == "pwm") {
+    int pulse_us = server.arg("value").toInt();
+    if (!set_servo_calibration_pulse_us((uint16_t)pulse_us)) {
+      calibration_error_msg = "PWM servo invalide.";
+      send_servo_calibration_state(false);
+      return;
+    }
+    send_servo_calibration_state();
+    return;
+  }
+
+  if (cmd == "offset") {
+    int offset_us = (int)get_servo_current_pulse_us() - SERVO_CMD_NEUTRAL_PULSE_US;
+    calibration_servo.neutral_offset_us = offset_us;
+    if (!set_servo_neutral_offset_us(offset_us)) {
+      calibration_error_msg = "Offset servo invalide.";
+      send_servo_calibration_state(false);
+      return;
+    }
+    set_servo_angle(get_servo_neutral_angle_deg());
+    reset_controller();
     send_servo_calibration_state();
     return;
   }
@@ -1638,14 +1776,25 @@ static void handle_servo_calibration_action(void) {
   if (cmd == "save") {
     int min_angle = server.arg("min").toInt();
     int max_angle = server.arg("max").toInt();
+    int limit_min = server.hasArg("limit_min") ? server.arg("limit_min").toInt() : min_angle;
+    int limit_max = server.hasArg("limit_max") ? server.arg("limit_max").toInt() : max_angle;
+    int offset_us = server.hasArg("offset") ? server.arg("offset").toInt() : calibration_servo.neutral_offset_us;
+    int step_us = server.hasArg("step") ? server.arg("step").toInt() : calibration_servo.pwm_step_us;
 
-    if (!set_servo_calibration_draft(min_angle, max_angle)) {
+    if(step_us < 1 || step_us > 100) {
+      calibration_error_msg = "Pas PWM invalide.";
+      send_servo_calibration_state(false);
+      return;
+    }
+    calibration_servo.pwm_step_us = step_us;
+
+    if (!set_servo_calibration_draft(min_angle, max_angle, limit_min, limit_max, offset_us)) {
       calibration_error_msg = "Angles servo invalides. Verifiez que min < max et que les valeurs restent entre 0 et 180 deg.";
       send_servo_calibration_state(false);
       return;
     }
 
-    set_servo_angle(calibration_servo.neutral_angle);
+    set_servo_angle(get_servo_neutral_angle_deg());
     reset_controller();
 
     if (distance_sensors_calibrated) {
