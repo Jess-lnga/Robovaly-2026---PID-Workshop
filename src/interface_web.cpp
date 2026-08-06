@@ -26,9 +26,9 @@ static const uint32_t CONTROLLER_SAVE_COOLDOWN_MS = 2000;
 static const float CONTROLLER_SAVE_FLOAT_EPSILON = 0.000001f;
 static const char *ADVANCED_NAMESPACE = "advanced";
 static const char *ADVANCED_VERSION_KEY = "version";
-static const uint32_t ADVANCED_SCHEMA_VERSION = 7;
+static const uint32_t ADVANCED_SCHEMA_VERSION = 8;
 static const uint32_t ADVANCED_SAVE_COOLDOWN_MS = 2000;
-static const int PLOT_DEFAULT_MAX_SECONDS = 30;
+static const int PLOT_DEFAULT_MAX_SECONDS = 10;
 static const int PLOT_MIN_MAX_SECONDS = 10;
 static const int PLOT_MAX_MAX_SECONDS = 50;
 static const int MANUAL_ANGLE_DEFAULT_STEP_DEG = 5;
@@ -79,8 +79,8 @@ struct TofCalibrationDraft {
 struct ServoCalibrationDraft {
   int theoretical_min_angle = SERVO_CMD_DEFAULT_THEORETICAL_MIN_DEG;
   int theoretical_max_angle = SERVO_CMD_DEFAULT_THEORETICAL_MAX_DEG;
-  int limit_min_angle = SERVO_CMD_DEFAULT_THEORETICAL_MIN_DEG;
-  int limit_max_angle = SERVO_CMD_DEFAULT_THEORETICAL_MAX_DEG;
+  int limit_min_angle = SERVO_CMD_DEFAULT_LIMIT_MIN_DEG;
+  int limit_max_angle = SERVO_CMD_DEFAULT_LIMIT_MAX_DEG;
   int neutral_offset_us = 0;
   int pwm_step_us = SERVO_CMD_DEFAULT_PWM_STEP_US;
 };
@@ -221,11 +221,43 @@ const stabToggle=document.getElementById('stabToggle'), manualMinusBtn=document.
 const refInput=document.getElementById('refInput'), kpInput=document.getElementById('kpInput'), kiInput=document.getElementById('kiInput'), kdInput=document.getElementById('kdInput');
 const saveValuesBtn=document.getElementById('saveValuesBtn'), resetValuesBtn=document.getElementById('resetValuesBtn'), neutralBtn=document.getElementById('neutralBtn'), saveStatus=document.getElementById('saveStatus');
 const servoTxt=document.getElementById('servoTxt'), tableTxt=document.getElementById('tableTxt'), xTxt=document.getElementById('xTxt'), vTxt=document.getElementById('vTxt'), d1Txt=document.getElementById('d1Txt'), d2Txt=document.getElementById('d2Txt');
-let state={x:-1,v:0,speed_valid:false,servo_angle:90,stabilization:true,kp:0,ki:0,kd:0,ref:150,d1:-1,d2:-1,servo_min:0,servo_max:180,servo_neutral:90,servo_theoretical_min:0,servo_theoretical_max:180,manual_angle_step:5};
-let sceneFrozen=false, plotRunning=false, continuousPlot=false, angleFrozen=false, posFrozen=false, speedFrozen=false, plotStart=0, angleData=[], posData=[], speedData=[], lastStab=true, editing=false, neutralTimer=null;
+let state={x:-1,v:0,speed_valid:false,servo_angle:90,stabilization:true,controller_valid:false,ball_stable:false,kp:0,ki:0,kd:0,ref:150,d1:-1,d2:-1,servo_min:0,servo_max:180,servo_neutral:90,servo_theoretical_min:0,servo_theoretical_max:180,manual_angle_step:5};
+let sceneFrozen=false, plotRunning=false, continuousPlot=false, angleFrozen=false, posFrozen=false, speedFrozen=false, plotStart=0, plotLastT=0, angleData=[], posData=[], speedData=[], lostIntervals=[], lastBallFoundPlotT=0, plotWasLost=false, lastStab=true, editing=false, neutralTimer=null;
 let toastTimer=null;
 function notify(msg){if(!toast)return;toast.textContent=msg;toast.style.display='block';if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(()=>toast.style.display='none',2600)}
 function fit(c){const r=c.getBoundingClientRect(),d=window.devicePixelRatio||1;const w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));if(c.width!==w||c.height!==h){c.width=w;c.height=h}}
+function systemStatus(){
+  if(isBallLost())return {text:'Ball lost',color:'#c43131'};
+  if(!state.stabilization)return {text:'Manual',color:'#2457b8'};
+  if(state.ball_stable)return {text:'Stable',color:'#208444'};
+  return {text:'Balancing...',color:'#666'};
+}
+function isBallLost(){
+  return state.x<0||state.controller_valid===false;
+}
+function roundedRect(c,x,y,w,h,r){
+  r=Math.min(r,w/2,h/2);
+  c.beginPath();
+  c.moveTo(x+r,y);c.lineTo(x+w-r,y);c.quadraticCurveTo(x+w,y,x+w,y+r);
+  c.lineTo(x+w,y+h-r);c.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  c.lineTo(x+r,y+h);c.quadraticCurveTo(x,y+h,x,y+h-r);
+  c.lineTo(x,y+r);c.quadraticCurveTo(x,y,x+r,y);
+  c.closePath();
+}
+function drawStatusBadge(c,w,h){
+  const st=systemStatus();
+  const fs=Math.max(15,w*.022),padX=Math.max(12,w*.014),bh=fs+18;
+  c.save();
+  c.font=`900 ${fs}px Arial`;
+  const bw=c.measureText(st.text).width+padX*2;
+  const x=w-bw-18,y=h-bh-18;
+  roundedRect(c,x,y,bw,bh,bh/2);
+  c.fillStyle='#fffdf6';c.fill();
+  c.lineWidth=3;c.strokeStyle=st.color;c.stroke();
+  c.fillStyle=st.color;c.textBaseline='middle';
+  c.fillText(st.text,x+padX,y+bh/2+1);
+  c.restore();
+}
 function drawScene(){
 fit(scene);
 const c=scene.getContext('2d'),w=scene.width,h=scene.height;
@@ -243,20 +275,28 @@ let p=state.x>=0?Math.max(0,Math.min(TABLE_LEN_MM,state.x))/TABLE_LEN_MM:.5;
 const r=Math.max(16,Math.min(w,h)*.04);
 let contactX=x1+(x2-x1)*p,contactY=y1+(y2-y1)*p;
 let bx=contactX+nx*r,by=contactY+ny*r;
-c.beginPath();c.arc(bx,by,r,0,Math.PI*2);c.stroke();
-c.beginPath();c.moveTo(bx-r*.65,by-r*.65);c.lineTo(bx+r*.65,by+r*.65);c.moveTo(bx+r*.65,by-r*.65);c.lineTo(bx-r*.65,by+r*.65);c.stroke();
+if(state.x>=0){
+  c.beginPath();c.arc(bx,by,r,0,Math.PI*2);c.stroke();
+  c.beginPath();c.moveTo(bx-r*.65,by-r*.65);c.lineTo(bx+r*.65,by+r*.65);c.moveTo(bx+r*.65,by-r*.65);c.lineTo(bx-r*.65,by+r*.65);c.stroke();
+}else{
+  c.save();
+  c.setLineDash([10,7]);
+  c.strokeStyle='#c43131';
+  c.lineWidth=4;
+  c.beginPath();c.arc(bx,by,r,0,Math.PI*2);c.stroke();
+  c.restore();
+}
 c.font=`${Math.max(14,w*.018)}px Arial`;
 c.fillText(`x=${state.x} mm`,18,h-44);
 c.fillText(`servo=${state.servo_angle} deg / table=${tableDeg.toFixed(1)} deg`,18,h-20);
+drawStatusBadge(c,w,h);
 }
 function scaleMax(t){return Math.min(PLOT_MAX_S,Math.max(10,Math.ceil(Math.max(0.001,t)/10)*10))}
 function drawPlot(canvas,data,color,label,freeze){
 fit(canvas);
 const c=canvas.getContext('2d'),w=canvas.width,h=canvas.height,p=44;
 c.clearRect(0,0,w,h);
-c.lineWidth=3;c.strokeStyle='#171717';
-c.beginPath();c.moveTo(p,12);c.lineTo(p,h-p);c.lineTo(w-12,h-p);c.stroke();
-const tNow=plotRunning?(performance.now()-plotStart)/1000:(data.length?data[data.length-1].t:0);
+const tNow=plotRunning?(performance.now()-plotStart)/1000:plotLastT;
 const xStart=continuousPlot&&tNow>PLOT_MAX_S?tNow-PLOT_MAX_S:0;
 const xEnd=continuousPlot&&tNow>PLOT_MAX_S?tNow:scaleMax(tNow);
 let vals=data.map(d=>d.y).filter(Number.isFinite);
@@ -277,6 +317,21 @@ else if(vals.length&&label!=='pos'){
   if(ymax-ymin<20){ymin-=10;ymax+=10}
 }
 const yOf=v=>h-p-(v-ymin)/(ymax-ymin)*(h-p-16);
+const xOf=t=>p+((t-xStart)/(xEnd-xStart))*(w-p-18);
+if(label==='pos'||label==='speed'){
+  lostIntervals.forEach(iv=>{
+    const end=iv.end==null?tNow:iv.end;
+    const a=Math.max(iv.start,xStart),b=Math.min(end,xEnd);
+    if(b>a){
+      c.save();
+      c.fillStyle='rgba(196,49,49,.24)';
+      c.fillRect(xOf(a),12,xOf(b)-xOf(a),h-p-12);
+      c.restore();
+    }
+  });
+}
+c.lineWidth=3;c.strokeStyle='#171717';
+c.beginPath();c.moveTo(p,12);c.lineTo(p,h-p);c.lineTo(w-12,h-p);c.stroke();
 function dashedRef(value,text){
   if(value<ymin||value>ymax)return;
   const y=yOf(value);
@@ -294,10 +349,15 @@ if(label==='angle')dashedRef(state.servo_neutral||90,`neutral ${state.servo_neut
 if(label==='pos')dashedRef(state.ref,`x0 ${state.ref} mm`);
 if(label==='speed')dashedRef(0,'0 mm/s');
 c.strokeStyle=color;c.lineWidth=4;c.beginPath();
-data.forEach((d,i)=>{
-  const x=p+((d.t-xStart)/(xEnd-xStart))*(w-p-18);
+let drawing=false;
+data.forEach(d=>{
+  if(((label==='pos'||label==='speed')&&d.lost)||!Number.isFinite(d.y)||d.t<xStart||d.t>xEnd){
+    drawing=false;
+    return;
+  }
+  const x=xOf(d.t);
   const y=yOf(d.y);
-  if(i===0)c.moveTo(x,y);else c.lineTo(x,y);
+  if(!drawing){c.moveTo(x,y);drawing=true}else c.lineTo(x,y);
 });
 c.stroke();
 c.fillStyle='#171717';
@@ -312,9 +372,22 @@ if(label==='speed'&&vals.length){
 }
 function drawAll(){if(!sceneFrozen)drawScene();if(!angleFrozen)drawPlot(anglePlot,angleData,'#c43131','angle',false);if(!posFrozen)drawPlot(posPlot,posData,'#2457b8','pos',false);if(!speedFrozen)drawPlot(speedPlot,speedData,'#208444','speed',false)}
 function updateTexts(){if(state.stabilization&&neutralTimer){clearInterval(neutralTimer);neutralTimer=null}servoTxt.textContent=state.servo_angle;manualAngleTxt.textContent=state.servo_angle;tableTxt.textContent=(state.servo_angle-state.servo_neutral).toFixed(1);xTxt.textContent=state.x>=0?state.x:'--';vTxt.textContent=state.speed_valid?state.v:'--';d1Txt.textContent=state.d1>=0?state.d1:'--';d2Txt.textContent=state.d2>=0?state.d2:'--';stabToggle.textContent=state.stabilization?'||':'▶';manualMinusBtn.disabled=state.stabilization;manualPlusBtn.disabled=state.stabilization;neutralBtn.disabled=state.stabilization;if(!editing){refInput.value=state.ref;kpInput.value=Number(state.kp).toFixed(3);kiInput.value=Number(state.ki).toFixed(3);kdInput.value=Number(state.kd).toFixed(3)}lastStab=state.stabilization}
-function trimContinuousData(t){const minT=Math.max(0,t-PLOT_MAX_S);angleData=angleData.filter(d=>d.t>=minT);posData=posData.filter(d=>d.t>=minT);speedData=speedData.filter(d=>d.t>=minT)}
-async function fetchState(){try{const r=await fetch('/api/state',{cache:'no-store'});state=await r.json();TABLE_LEN_MM=state.table_length||290;PLOT_MAX_S=state.plot_max_s||30;updateTexts();if(plotRunning){const t=(performance.now()-plotStart)/1000;if(t<=PLOT_MAX_S||continuousPlot){angleData.push({t,y:state.servo_angle});posData.push({t,y:state.x>=0?state.x:NaN});speedData.push({t,y:state.speed_valid?state.v:NaN});if(continuousPlot)trimContinuousData(t);plotInfo.textContent=`Plot running: ${t.toFixed(1)} s / ${PLOT_MAX_S} s${continuousPlot?' continuous':''}`}else{plotRunning=false;plotToggle.textContent='Go';plotInfo.textContent=`${PLOT_MAX_S} s reached. Plot stopped.`}}drawAll()}catch(e){}}
-function startPlot(){angleData=[];posData=[];speedData=[];plotStart=performance.now();plotRunning=true;angleFrozen=false;posFrozen=false;speedFrozen=false;plotToggle.textContent='Stop';plotInfo.textContent='Plot running'}
+function trimContinuousData(t){const minT=Math.max(0,t-PLOT_MAX_S);angleData=angleData.filter(d=>d.t>=minT);posData=posData.filter(d=>d.t>=minT);speedData=speedData.filter(d=>d.t>=minT);lostIntervals=lostIntervals.filter(iv=>(iv.end==null?t:iv.end)>=minT)}
+function updateLostIntervals(t,lost){
+  if(!lost)lastBallFoundPlotT=t;
+  if(lost&&!plotWasLost){
+    lostIntervals.push({start:lastBallFoundPlotT,end:null});
+    posData.push({t,y:NaN,lost:true,gap:true});
+    speedData.push({t,y:NaN,lost:true,gap:true});
+  }else if(!lost&&plotWasLost&&lostIntervals.length){
+    lostIntervals[lostIntervals.length-1].end=t;
+    posData.push({t,y:NaN,lost:true,gap:true});
+    speedData.push({t,y:NaN,lost:true,gap:true});
+  }
+  plotWasLost=lost;
+}
+async function fetchState(){try{const r=await fetch('/api/state',{cache:'no-store'});state=await r.json();TABLE_LEN_MM=state.table_length||290;PLOT_MAX_S=state.plot_max_s||30;updateTexts();if(plotRunning){const t=(performance.now()-plotStart)/1000;plotLastT=t;if(t<=PLOT_MAX_S||continuousPlot){const lost=isBallLost();updateLostIntervals(t,lost);angleData.push({t,y:state.servo_angle,lost:false});posData.push({t,y:lost?NaN:state.x,lost});speedData.push({t,y:lost||!state.speed_valid?NaN:state.v,lost});if(continuousPlot)trimContinuousData(t);plotInfo.textContent=`Plot running: ${t.toFixed(1)} s / ${PLOT_MAX_S} s${continuousPlot?' continuous':''}`}else{plotRunning=false;plotToggle.textContent='Go';plotInfo.textContent=`${PLOT_MAX_S} s reached. Plot stopped.`}}drawAll()}catch(e){}}
+function startPlot(){angleData=[];posData=[];speedData=[];lostIntervals=[];lastBallFoundPlotT=0;plotWasLost=false;plotLastT=0;plotStart=performance.now();plotRunning=true;angleFrozen=false;posFrozen=false;speedFrozen=false;plotToggle.textContent='Stop';plotInfo.textContent='Plot running'}
 function stopPlot(){plotRunning=false;plotToggle.textContent='Go';plotInfo.textContent='Plot frozen. Press Go to restart from 0.'}
 plotToggle.onclick=()=>plotRunning?stopPlot():startPlot();scenePause.onclick=()=>{sceneFrozen=!sceneFrozen;scenePause.textContent=sceneFrozen?'▶':'||'};anglePause.onclick=()=>{angleFrozen=!angleFrozen;anglePause.textContent=angleFrozen?'▶':'||'};posPause.onclick=()=>{posFrozen=!posFrozen;posPause.textContent=posFrozen?'▶':'||'};speedPause.onclick=()=>{speedFrozen=!speedFrozen;speedPause.textContent=speedFrozen?'▶':'||'};
 continuousPlotBtn.onclick=()=>{continuousPlot=!continuousPlot;continuousPlotBtn.classList.toggle('active',continuousPlot);if(plotRunning){plotInfo.textContent=continuousPlot?'Continuous plot enabled.':'Continuous plot disabled.'}};
@@ -906,7 +979,7 @@ static bool capture_noise_estimate(int target_position_mm, int *position_noise_m
 
   *position_noise_mm = max(DEFAULT_POSITION_NOISE_DEADBAND_MM,
                            max_position_noise_mm + POSITION_NOISE_MARGIN_MM);
-  *speed_noise_mm_s = max(DEFAULT_SPEED_NOISE_DEADBAND_MM_S,
+  *speed_noise_mm_s = max(MIN_SPEED_NOISE_FLOOR_MM_S,
                           max_static_speed_mm_s + SPEED_NOISE_MARGIN_MM_S);
   return true;
 }
@@ -1611,8 +1684,8 @@ static bool load_advanced_settings(void) {
   int idle_exit = prefs.getInt("idle_exit", CONTROLLER_DEFAULT_IDLE_EXIT_PERCENT);
   uint32_t lost_delay = prefs.getUInt("lost_delay", CONTROLLER_DEFAULT_LOST_BALL_DELAY_MS);
   int lost_iter = prefs.getInt("lost_iter", CONTROLLER_DEFAULT_LOST_BALL_ITER);
-  int servo_min = prefs.getInt("servo_min", SERVO_CMD_MIN_DEG);
-  int servo_max = prefs.getInt("servo_max", SERVO_CMD_MAX_DEG);
+  int servo_min = prefs.getInt("servo_min", SERVO_CMD_DEFAULT_LIMIT_MIN_DEG);
+  int servo_max = prefs.getInt("servo_max", SERVO_CMD_DEFAULT_LIMIT_MAX_DEG);
   int servo_step = prefs.getInt("servo_step", SERVO_CMD_DEFAULT_PWM_STEP_US);
   int manual_step = prefs.getInt("manual_step", MANUAL_ANGLE_DEFAULT_STEP_DEG);
   int table_len = prefs.getInt("table_len", TABLE_LENGTH_DEFAULT_MM);

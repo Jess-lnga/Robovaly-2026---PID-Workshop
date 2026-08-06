@@ -9,8 +9,8 @@ static const uint32_t SERVO_PWM_PERIOD_US = 1000000UL / SERVO_PWM_FREQ_HZ;
 static uint8_t servo_pin_used = 255;
 static bool servo_initialized = false;
 
-static int servo_limit_min_angle_deg = SERVO_CMD_DEFAULT_THEORETICAL_MIN_DEG;
-static int servo_limit_max_angle_deg = SERVO_CMD_DEFAULT_THEORETICAL_MAX_DEG;
+static int servo_limit_min_angle_deg = SERVO_CMD_DEFAULT_LIMIT_MIN_DEG;
+static int servo_limit_max_angle_deg = SERVO_CMD_DEFAULT_LIMIT_MAX_DEG;
 static int servo_theoretical_min_angle_deg = SERVO_CMD_DEFAULT_THEORETICAL_MIN_DEG;
 static int servo_theoretical_max_angle_deg = SERVO_CMD_DEFAULT_THEORETICAL_MAX_DEG;
 static int servo_neutral_offset_us = 0;
@@ -217,8 +217,18 @@ int get_servo_theoretical_max_angle_deg(void) {
 }
 
 void reset_servo_advanced_parameters(void) {
-    servo_limit_min_angle_deg = servo_theoretical_min_angle_deg;
-    servo_limit_max_angle_deg = servo_theoretical_max_angle_deg;
+    int default_min = max(SERVO_CMD_DEFAULT_LIMIT_MIN_DEG, servo_theoretical_min_angle_deg);
+    int default_max = min(SERVO_CMD_DEFAULT_LIMIT_MAX_DEG, servo_theoretical_max_angle_deg);
+
+    if(default_min < default_max &&
+       get_servo_neutral_angle_deg() >= default_min &&
+       get_servo_neutral_angle_deg() <= default_max) {
+        servo_limit_min_angle_deg = default_min;
+        servo_limit_max_angle_deg = default_max;
+    } else {
+        servo_limit_min_angle_deg = servo_theoretical_min_angle_deg;
+        servo_limit_max_angle_deg = servo_theoretical_max_angle_deg;
+    }
 
     if(servo_initialized) {
         set_servo_angle(servo_angle_deg);
