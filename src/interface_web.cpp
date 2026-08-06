@@ -18,7 +18,7 @@ static const uint32_t WEB_TASK_DELAY_MS = 1;
 static const char *CALIBRATION_NAMESPACE = "tof_cal";
 static const char *CALIBRATION_DONE_KEY = "done";
 static const char *CALIBRATION_VERSION_KEY = "version";
-static const uint32_t CALIBRATION_SCHEMA_VERSION = 9;
+static const uint32_t CALIBRATION_SCHEMA_VERSION = 10;
 static const char *CONTROLLER_NAMESPACE = "ctrl";
 static const char *CONTROLLER_VERSION_KEY = "version";
 static const uint32_t CONTROLLER_SCHEMA_VERSION = 1;
@@ -88,6 +88,20 @@ struct ServoCalibrationDraft {
 struct NoiseCalibrationDraft {
   int position_mm[NOISE_PROFILE_POINT_COUNT] = {0, 72, 145, 218, TABLE_LENGTH_DEFAULT_MM};
   int position_noise_mm[NOISE_PROFILE_POINT_COUNT] = {
+      DEFAULT_POSITION_NOISE_DEADBAND_MM,
+      DEFAULT_POSITION_NOISE_DEADBAND_MM,
+      DEFAULT_POSITION_NOISE_DEADBAND_MM,
+      DEFAULT_POSITION_NOISE_DEADBAND_MM,
+      DEFAULT_POSITION_NOISE_DEADBAND_MM
+  };
+  int tof1_position_noise_mm[NOISE_PROFILE_POINT_COUNT] = {
+      DEFAULT_POSITION_NOISE_DEADBAND_MM,
+      DEFAULT_POSITION_NOISE_DEADBAND_MM,
+      DEFAULT_POSITION_NOISE_DEADBAND_MM,
+      DEFAULT_POSITION_NOISE_DEADBAND_MM,
+      DEFAULT_POSITION_NOISE_DEADBAND_MM
+  };
+  int tof2_position_noise_mm[NOISE_PROFILE_POINT_COUNT] = {
       DEFAULT_POSITION_NOISE_DEADBAND_MM,
       DEFAULT_POSITION_NOISE_DEADBAND_MM,
       DEFAULT_POSITION_NOISE_DEADBAND_MM,
@@ -976,15 +990,47 @@ static bool capture_raw_average(int tof_number, int *average_mm) {
   return true;
 }
 
-static bool capture_noise_estimate(int target_position_mm, int *position_noise_mm, int *speed_noise_mm_s) {
+static int estimate_position_noise_from_samples(const int *samples, int count, int fallback_noise_mm) {
+  static const int POSITION_NOISE_MARGIN_MM = 2;
+
+  if (count < 4) {
+    return fallback_noise_mm;
+  }
+
+  int sum_position_mm = 0;
+  for (int i = 0; i < count; i++) {
+    sum_position_mm += samples[i];
+  }
+
+  int mean_position_mm = (int)lroundf((float)sum_position_mm / (float)count);
+  int max_position_noise_mm = 0;
+  for (int i = 0; i < count; i++) {
+    int noise_mm = abs(samples[i] - mean_position_mm);
+    if (noise_mm > max_position_noise_mm) {
+      max_position_noise_mm = noise_mm;
+    }
+  }
+
+  return max(DEFAULT_POSITION_NOISE_DEADBAND_MM,
+             max_position_noise_mm + POSITION_NOISE_MARGIN_MM);
+}
+
+static bool capture_noise_estimate(int target_position_mm,
+                                   int *position_noise_mm,
+                                   int *speed_noise_mm_s,
+                                   int *tof1_position_noise_mm,
+                                   int *tof2_position_noise_mm) {
   static const int SAMPLE_COUNT = 28;
   static const uint32_t CAPTURE_TIMEOUT_MS = 2600;
   static const uint32_t SAMPLE_PERIOD_MS = 45;
-  static const int POSITION_NOISE_MARGIN_MM = 2;
   static const int SPEED_NOISE_MARGIN_MM_S = 20;
 
   int count = 0;
   int samples[SAMPLE_COUNT] = {0};
+  int tof1_samples[SAMPLE_COUNT] = {0};
+  int tof2_samples[SAMPLE_COUNT] = {0};
+  int tof1_count = 0;
+  int tof2_count = 0;
   int max_static_speed_mm_s = 0;
   int previous_position_mm = 0;
   uint32_t previous_sample_ms = 0;
@@ -1001,6 +1047,15 @@ static bool capture_noise_estimate(int target_position_mm, int *position_noise_m
     if (valid && now - last_sample_ms >= SAMPLE_PERIOD_MS) {
       int position_mm = get_ball_position();
       samples[count] = position_mm;
+
+      int tof1_position_mm = get_ball_position_from_tof(TOF1);
+      int tof2_position_mm = get_ball_position_from_tof(TOF2);
+      if (tof1_position_mm >= 0 && tof1_count < SAMPLE_COUNT) {
+        tof1_samples[tof1_count++] = tof1_position_mm;
+      }
+      if (tof2_position_mm >= 0 && tof2_count < SAMPLE_COUNT) {
+        tof2_samples[tof2_count++] = tof2_position_mm;
+      }
 
       if (count > 0 && now > previous_sample_ms) {
         int dt_ms = (int)(now - previous_sample_ms);
@@ -1029,23 +1084,22 @@ static bool capture_noise_estimate(int target_position_mm, int *position_noise_m
   }
 
   int mean_position_mm = (int)lroundf((float)sum_position_mm / (float)count);
-  int max_position_noise_mm = 0;
-  for (int i = 0; i < count; i++) {
-    int noise_mm = abs(samples[i] - mean_position_mm);
-    if (noise_mm > max_position_noise_mm) {
-      max_position_noise_mm = noise_mm;
-    }
-  }
-
   int target_bias_mm = abs(mean_position_mm - target_position_mm);
   if (target_bias_mm > 25) {
     return false;
   }
 
-  *position_noise_mm = max(DEFAULT_POSITION_NOISE_DEADBAND_MM,
-                           max_position_noise_mm + POSITION_NOISE_MARGIN_MM);
+  *position_noise_mm = estimate_position_noise_from_samples(samples,
+                                                            count,
+                                                            DEFAULT_POSITION_NOISE_DEADBAND_MM);
   *speed_noise_mm_s = max(MIN_SPEED_NOISE_FLOOR_MM_S,
                           max_static_speed_mm_s + SPEED_NOISE_MARGIN_MM_S);
+  *tof1_position_noise_mm = estimate_position_noise_from_samples(tof1_samples,
+                                                                 tof1_count,
+                                                                 DEFAULT_POSITION_NOISE_DEADBAND_MM);
+  *tof2_position_noise_mm = estimate_position_noise_from_samples(tof2_samples,
+                                                                 tof2_count,
+                                                                 DEFAULT_POSITION_NOISE_DEADBAND_MM);
   return true;
 }
 
@@ -1132,6 +1186,8 @@ static void save_draft_to_preferences(void) {
     prefs.putInt(("n_p" + String(i)).c_str(), calibration_noise.position_mm[i]);
     prefs.putInt(("n_x" + String(i)).c_str(), calibration_noise.position_noise_mm[i]);
     prefs.putInt(("n_v" + String(i)).c_str(), calibration_noise.speed_noise_mm_s[i]);
+    prefs.putInt(("n_t1x" + String(i)).c_str(), calibration_noise.tof1_position_noise_mm[i]);
+    prefs.putInt(("n_t2x" + String(i)).c_str(), calibration_noise.tof2_position_noise_mm[i]);
   }
   prefs.end();
 }
@@ -1167,11 +1223,19 @@ static bool load_draft_from_preferences(void) {
       calibration_noise.position_mm[i] = prefs.getInt(("n_p" + String(i)).c_str(), calibration_noise.position_mm[i]);
       calibration_noise.position_noise_mm[i] = prefs.getInt(("n_x" + String(i)).c_str(), calibration_noise.position_noise_mm[i]);
       calibration_noise.speed_noise_mm_s[i] = prefs.getInt(("n_v" + String(i)).c_str(), calibration_noise.speed_noise_mm_s[i]);
+      calibration_noise.tof1_position_noise_mm[i] = prefs.getInt(("n_t1x" + String(i)).c_str(), calibration_noise.tof1_position_noise_mm[i]);
+      calibration_noise.tof2_position_noise_mm[i] = prefs.getInt(("n_t2x" + String(i)).c_str(), calibration_noise.tof2_position_noise_mm[i]);
     }
     set_noise_rejection_profile(calibration_noise.position_mm,
                                 calibration_noise.position_noise_mm,
                                 calibration_noise.speed_noise_mm_s,
                                 NOISE_PROFILE_POINT_COUNT);
+    set_tof_position_noise_profile(TOF1,
+                                   calibration_noise.tof1_position_noise_mm,
+                                   NOISE_PROFILE_POINT_COUNT);
+    set_tof_position_noise_profile(TOF2,
+                                   calibration_noise.tof2_position_noise_mm,
+                                   NOISE_PROFILE_POINT_COUNT);
   }
 
   prefs.end();
@@ -2179,6 +2243,12 @@ static void handle_calibration_action(void) {
                                 calibration_noise.position_noise_mm,
                                 calibration_noise.speed_noise_mm_s,
                                 NOISE_PROFILE_POINT_COUNT);
+    set_tof_position_noise_profile(TOF1,
+                                   calibration_noise.tof1_position_noise_mm,
+                                   NOISE_PROFILE_POINT_COUNT);
+    set_tof_position_noise_profile(TOF2,
+                                   calibration_noise.tof2_position_noise_mm,
+                                   NOISE_PROFILE_POINT_COUNT);
     save_draft_to_preferences();
     distance_sensors_calibrated = true;
     servo_calibration_initial_in_progress = false;
@@ -2209,8 +2279,14 @@ static void handle_calibration_action(void) {
       int target_position_mm = calibration_noise.position_mm[noise_index];
       int position_noise_mm = DEFAULT_POSITION_NOISE_DEADBAND_MM;
       int speed_noise_mm_s = DEFAULT_SPEED_NOISE_DEADBAND_MM_S;
+      int tof1_position_noise_mm = DEFAULT_POSITION_NOISE_DEADBAND_MM;
+      int tof2_position_noise_mm = DEFAULT_POSITION_NOISE_DEADBAND_MM;
 
-      if (!capture_noise_estimate(target_position_mm, &position_noise_mm, &speed_noise_mm_s)) {
+      if (!capture_noise_estimate(target_position_mm,
+                                  &position_noise_mm,
+                                  &speed_noise_mm_s,
+                                  &tof1_position_noise_mm,
+                                  &tof2_position_noise_mm)) {
         calibration_error_msg = "Impossible de mesurer le bruit. Verifiez que la balle est immobile et visible.";
         send_calibration_state();
         return;
@@ -2218,6 +2294,8 @@ static void handle_calibration_action(void) {
 
       calibration_noise.position_noise_mm[noise_index] = position_noise_mm;
       calibration_noise.speed_noise_mm_s[noise_index] = speed_noise_mm_s;
+      calibration_noise.tof1_position_noise_mm[noise_index] = tof1_position_noise_mm;
+      calibration_noise.tof2_position_noise_mm[noise_index] = tof2_position_noise_mm;
       calibration_step = noise_step_for_index(noise_index + 1);
       send_calibration_state();
       return;

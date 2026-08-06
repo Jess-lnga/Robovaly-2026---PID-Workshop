@@ -81,6 +81,20 @@ static int position_noise_deadband_mm[NOISE_PROFILE_POINT_COUNT] = {
     DEFAULT_POSITION_NOISE_DEADBAND_MM,
     DEFAULT_POSITION_NOISE_DEADBAND_MM
 };
+static int tof1_position_noise_deadband_mm[NOISE_PROFILE_POINT_COUNT] = {
+    DEFAULT_POSITION_NOISE_DEADBAND_MM,
+    DEFAULT_POSITION_NOISE_DEADBAND_MM,
+    DEFAULT_POSITION_NOISE_DEADBAND_MM,
+    DEFAULT_POSITION_NOISE_DEADBAND_MM,
+    DEFAULT_POSITION_NOISE_DEADBAND_MM
+};
+static int tof2_position_noise_deadband_mm[NOISE_PROFILE_POINT_COUNT] = {
+    DEFAULT_POSITION_NOISE_DEADBAND_MM,
+    DEFAULT_POSITION_NOISE_DEADBAND_MM,
+    DEFAULT_POSITION_NOISE_DEADBAND_MM,
+    DEFAULT_POSITION_NOISE_DEADBAND_MM,
+    DEFAULT_POSITION_NOISE_DEADBAND_MM
+};
 static int speed_noise_deadband_mm_s[NOISE_PROFILE_POINT_COUNT] = {
     DEFAULT_SPEED_NOISE_DEADBAND_MM_S,
     DEFAULT_SPEED_NOISE_DEADBAND_MM_S,
@@ -128,6 +142,11 @@ static void reset_speed_estimator() {
 
 static float noise_weight_for_position(int position_mm) {
     int noise_mm = max(1, get_position_noise_deadband_mm(position_mm));
+    return 1.0f / ((float)noise_mm * (float)noise_mm);
+}
+
+static float tof_noise_weight_for_position(int tof_number, int position_mm) {
+    int noise_mm = max(1, get_tof_position_noise_deadband_mm(tof_number, position_mm));
     return 1.0f / ((float)noise_mm * (float)noise_mm);
 }
 
@@ -453,7 +472,7 @@ bool compute_ball_position(){
         if(d1_corr >= 0){
             x_from_tof1 = clamp_int_local(table_length_mm - d1_corr, 0, table_length_mm);
             tof1_weight = tof_fov_weight(d1_corr, REAL_DISTANCE_AT_FOV1);
-            tof1_weight *= noise_weight_for_position(x_from_tof1);
+            tof1_weight *= tof_noise_weight_for_position(TOF1, x_from_tof1);
         }
     } else {
         d1_corr = -1;
@@ -464,7 +483,7 @@ bool compute_ball_position(){
         if(d2_corr >= 0){
             x_from_tof2 = clamp_int_local(d2_corr, 0, table_length_mm);
             tof2_weight = tof_fov_weight(d2_corr, REAL_DISTANCE_AT_FOV2);
-            tof2_weight *= noise_weight_for_position(x_from_tof2);
+            tof2_weight *= tof_noise_weight_for_position(TOF2, x_from_tof2);
         }
     } else {
         d2_corr = -1;
@@ -616,6 +635,49 @@ int get_speed_noise_deadband_mm_s(int position_mm){
     return interpolate_noise_value(speed_noise_deadband_mm_s, position_mm);
 }
 
+bool set_tof_position_noise_profile(int tof_number,
+                                    const int *position_noise_mm,
+                                    int count){
+    if(position_noise_mm == nullptr || count != NOISE_PROFILE_POINT_COUNT){
+        return false;
+    }
+
+    for(int i = 0; i < count; i++){
+        if(position_noise_mm[i] < 0 || position_noise_mm[i] > 100){
+            return false;
+        }
+    }
+
+    int *target = nullptr;
+    if(tof_number == TOF1){
+        target = tof1_position_noise_deadband_mm;
+    } else if(tof_number == TOF2){
+        target = tof2_position_noise_deadband_mm;
+    } else {
+        return false;
+    }
+
+    for(int i = 0; i < count; i++){
+        target[i] = position_noise_mm[i];
+    }
+
+    ball_position_prev_valid = false;
+    reset_speed_estimator();
+    return true;
+}
+
+int get_tof_position_noise_deadband_mm(int tof_number, int position_mm){
+    if(tof_number == TOF1){
+        return interpolate_noise_value(tof1_position_noise_deadband_mm, position_mm);
+    }
+
+    if(tof_number == TOF2){
+        return interpolate_noise_value(tof2_position_noise_deadband_mm, position_mm);
+    }
+
+    return get_position_noise_deadband_mm(position_mm);
+}
+
 bool set_alpha_beta_parameters(float min_alpha, float max_alpha,
                                float min_beta, float max_beta){
     if(min_alpha < 0.0f || min_alpha > 1.0f ||
@@ -684,6 +746,8 @@ void reset_ball_position_advanced_parameters(){
         DEFAULT_SPEED_NOISE_DEADBAND_MM_S
     };
     set_noise_rejection_profile(positions, position_noise, speed_noise, NOISE_PROFILE_POINT_COUNT);
+    set_tof_position_noise_profile(TOF1, position_noise, NOISE_PROFILE_POINT_COUNT);
+    set_tof_position_noise_profile(TOF2, position_noise, NOISE_PROFILE_POINT_COUNT);
 }
 
 static size_t previous_line_length = 0;

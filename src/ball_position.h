@@ -49,6 +49,10 @@ void get_noise_rejection_profile(int *positions_mm,
                                  int count);
 int get_position_noise_deadband_mm(int position_mm);
 int get_speed_noise_deadband_mm_s(int position_mm);
+bool set_tof_position_noise_profile(int tof_number,
+                                    const int *position_noise_mm,
+                                    int count);
+int get_tof_position_noise_deadband_mm(int tof_number, int position_mm);
 bool set_alpha_beta_parameters(float min_alpha, float max_alpha,
                                float min_beta, float max_beta);
 void get_alpha_beta_parameters(float *min_alpha, float *max_alpha,
