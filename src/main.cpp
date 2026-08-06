@@ -31,6 +31,7 @@ void setup() {
   delay(200);
 
   init_tof(false);
+  load_startup_persistent_settings();
   init_controller();
   launch_interface_web();
 

@@ -15,6 +15,7 @@ extern "C" {
 #endif
 
 bool launch_interface_web(void);
+bool load_startup_persistent_settings(void);
 
 #ifdef __cplusplus
 }

@@ -9,10 +9,10 @@ static const uint32_t SERVO_PWM_PERIOD_US = 1000000UL / SERVO_PWM_FREQ_HZ;
 static uint8_t servo_pin_used = 255;
 static bool servo_initialized = false;
 
-static int servo_limit_min_angle_deg = SERVO_CMD_MIN_DEG;
-static int servo_limit_max_angle_deg = SERVO_CMD_MAX_DEG;
-static int servo_theoretical_min_angle_deg = SERVO_CMD_MIN_DEG;
-static int servo_theoretical_max_angle_deg = SERVO_CMD_MAX_DEG;
+static int servo_limit_min_angle_deg = SERVO_CMD_DEFAULT_THEORETICAL_MIN_DEG;
+static int servo_limit_max_angle_deg = SERVO_CMD_DEFAULT_THEORETICAL_MAX_DEG;
+static int servo_theoretical_min_angle_deg = SERVO_CMD_DEFAULT_THEORETICAL_MIN_DEG;
+static int servo_theoretical_max_angle_deg = SERVO_CMD_DEFAULT_THEORETICAL_MAX_DEG;
 static int servo_neutral_offset_us = 0;
 static uint16_t servo_min_pulse_us = SERVO_CMD_MIN_PULSE_US;
 static uint16_t servo_max_pulse_us = SERVO_CMD_MAX_PULSE_US;

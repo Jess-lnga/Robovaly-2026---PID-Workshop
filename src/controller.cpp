@@ -23,6 +23,8 @@ static uint32_t lost_ball_delay_ms = CONTROLLER_DEFAULT_LOST_BALL_DELAY_MS;
 static int lost_ball_iter = CONTROLLER_DEFAULT_LOST_BALL_ITER;
 static int max_control_speed_mm_s = CONTROLLER_DEFAULT_MAX_CONTROL_SPEED_MM_S;
 static uint32_t controller_period_ms = CONTROLLER_DEFAULT_PERIOD_MS;
+static uint32_t stable_time_ms = CONTROLLER_DEFAULT_STABLE_TIME_MS;
+static int idle_exit_percent = CONTROLLER_DEFAULT_IDLE_EXIT_PERCENT;
 
 static float kp = 0.15f;
 static float ki = 0.1f;
@@ -32,7 +34,10 @@ static float integral_error_mm_s = 0.0f;
 static float filtered_angle_deg = SERVO_CMD_NEUTRAL_DEG;
 static uint32_t last_update_ms = 0;
 static uint32_t lost_ball_start_ms = 0;
+static uint32_t stable_score_ms = 0;
 static int lost_ball_count = 0;
+static bool ball_stable = false;
+static bool controller_idle = false;
 
 static int clamp_int(int value, int min_value, int max_value) {
     if(value < min_value) return min_value;
@@ -87,6 +92,32 @@ static void reset_pid_terms(void) {
     filtered_angle_deg = (float)last_angle_deg;
 }
 
+static void reset_stability_state(void) {
+    stable_score_ms = 0;
+    ball_stable = false;
+    controller_idle = false;
+}
+
+static void update_stability_score(bool stable_now, uint32_t dt_ms) {
+    if(stable_now) {
+        uint32_t next_score = stable_score_ms + dt_ms;
+        stable_score_ms = (next_score > stable_time_ms) ? stable_time_ms : next_score;
+    } else {
+        uint32_t penalty_ms = dt_ms * 2;
+        stable_score_ms = (penalty_ms >= stable_score_ms) ? 0 : stable_score_ms - penalty_ms;
+    }
+
+    ball_stable = stable_score_ms >= stable_time_ms;
+}
+
+static bool idle_should_exit(float error_mm, int speed_mm_s) {
+    int exit_position_mm = max(1, (position_deadband_mm * idle_exit_percent) / 100);
+    int exit_speed_mm_s = max(1, (speed_deadband_mm_s * idle_exit_percent) / 100);
+
+    return abs((int)lroundf(error_mm)) > exit_position_mm ||
+           abs(speed_mm_s) > exit_speed_mm_s;
+}
+
 static bool command_smoothed_angle(int raw_angle_deg, int max_step_deg) {
     int angle_deg = smooth_servo_angle(raw_angle_deg, max_step_deg);
 
@@ -114,6 +145,7 @@ static bool handle_lost_ball(uint32_t now) {
         lost_ball_start_ms = now;
     }
 
+    reset_stability_state();
     lost_ball_count++;
 
     if(lost_ball_count >= lost_ball_iter) {
@@ -154,6 +186,7 @@ void reset_controller(void) {
     filtered_angle_deg = (float)last_angle_deg;
     lost_ball_start_ms = 0;
     lost_ball_count = 0;
+    reset_stability_state();
 }
 
 bool update_controller(void) {
@@ -193,6 +226,25 @@ bool update_controller(void) {
     speed_mm_s = clamp_int(speed_mm_s, -max_control_speed_mm_s, max_control_speed_mm_s);
 
     float error_mm = (float)reference_mm - (float)position_mm;
+    bool stable_now = speed_valid &&
+                      abs((int)lroundf(error_mm)) <= position_deadband_mm &&
+                      abs(speed_mm_s) <= speed_deadband_mm_s;
+    update_stability_score(stable_now, dt_ms);
+
+    if(!controller_idle && ball_stable) {
+        controller_idle = true;
+        reset_pid_terms();
+    }
+
+    if(controller_idle) {
+        if(idle_should_exit(error_mm, speed_mm_s)) {
+            reset_stability_state();
+            reset_pid_terms();
+        } else {
+            return command_smoothed_angle(get_servo_neutral_angle_deg());
+        }
+    }
+
     float effective_error_mm = soften_deadband_signal(error_mm, (float)position_deadband_mm);
     float effective_speed_mm_s = speed_valid
                                  ? soften_deadband_signal((float)speed_mm_s,
@@ -361,6 +413,42 @@ uint32_t get_controller_period_ms(void) {
     return controller_period_ms;
 }
 
+bool set_controller_stable_time_ms(uint32_t new_stable_time_ms) {
+    if(new_stable_time_ms < 100 || new_stable_time_ms > 5000) {
+        return false;
+    }
+
+    stable_time_ms = new_stable_time_ms;
+    reset_stability_state();
+    return true;
+}
+
+uint32_t get_controller_stable_time_ms(void) {
+    return stable_time_ms;
+}
+
+bool set_controller_idle_exit_percent(int exit_percent) {
+    if(exit_percent < 100 || exit_percent > 500) {
+        return false;
+    }
+
+    idle_exit_percent = exit_percent;
+    reset_stability_state();
+    return true;
+}
+
+int get_controller_idle_exit_percent(void) {
+    return idle_exit_percent;
+}
+
+bool controller_ball_is_stable(void) {
+    return ball_stable;
+}
+
+bool controller_is_idle(void) {
+    return controller_idle;
+}
+
 void reset_controller_advanced_parameters(void) {
     servo_max_step_deg = CONTROLLER_DEFAULT_MAX_STEP_DEG;
     position_deadband_mm = CONTROLLER_DEFAULT_POSITION_DEADBAND_MM;
@@ -369,5 +457,7 @@ void reset_controller_advanced_parameters(void) {
     lost_ball_iter = CONTROLLER_DEFAULT_LOST_BALL_ITER;
     max_control_speed_mm_s = CONTROLLER_DEFAULT_MAX_CONTROL_SPEED_MM_S;
     controller_period_ms = CONTROLLER_DEFAULT_PERIOD_MS;
+    stable_time_ms = CONTROLLER_DEFAULT_STABLE_TIME_MS;
+    idle_exit_percent = CONTROLLER_DEFAULT_IDLE_EXIT_PERCENT;
     reset_controller();
 }

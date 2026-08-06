@@ -26,7 +26,7 @@ static const uint32_t CONTROLLER_SAVE_COOLDOWN_MS = 2000;
 static const float CONTROLLER_SAVE_FLOAT_EPSILON = 0.000001f;
 static const char *ADVANCED_NAMESPACE = "advanced";
 static const char *ADVANCED_VERSION_KEY = "version";
-static const uint32_t ADVANCED_SCHEMA_VERSION = 6;
+static const uint32_t ADVANCED_SCHEMA_VERSION = 7;
 static const uint32_t ADVANCED_SAVE_COOLDOWN_MS = 2000;
 static const int PLOT_DEFAULT_MAX_SECONDS = 30;
 static const int PLOT_MIN_MAX_SECONDS = 10;
@@ -77,10 +77,10 @@ struct TofCalibrationDraft {
 };
 
 struct ServoCalibrationDraft {
-  int theoretical_min_angle = SERVO_CMD_MIN_DEG;
-  int theoretical_max_angle = SERVO_CMD_MAX_DEG;
-  int limit_min_angle = SERVO_CMD_MIN_DEG;
-  int limit_max_angle = SERVO_CMD_MAX_DEG;
+  int theoretical_min_angle = SERVO_CMD_DEFAULT_THEORETICAL_MIN_DEG;
+  int theoretical_max_angle = SERVO_CMD_DEFAULT_THEORETICAL_MAX_DEG;
+  int limit_min_angle = SERVO_CMD_DEFAULT_THEORETICAL_MIN_DEG;
+  int limit_max_angle = SERVO_CMD_DEFAULT_THEORETICAL_MAX_DEG;
   int neutral_offset_us = 0;
   int pwm_step_us = SERVO_CMD_DEFAULT_PWM_STEP_US;
 };
@@ -447,6 +447,8 @@ button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:18p
 <label>Max angle step / cycle [deg]</label><input id="maxStep" type="number" min="0" max="180" step="1">
 <label>Position precision [mm]</label><input id="posDb" type="number" min="0" max="50" step="1">
 <label>Speed precision [mm/s]</label><input id="speedDb" type="number" min="0" max="300" step="1">
+<label>Stable confirm time [ms]</label><input id="stableTime" type="number" min="100" max="5000" step="50">
+<label>Idle exit hysteresis [%]</label><input id="idleExit" type="number" min="100" max="500" step="10">
 <label>Lost ball delay [s]</label><input id="lostDelay" type="number" min="0" max="10" step="0.1">
 <label>Lost ball iter [cycles]</label><input id="lostIter" type="number" min="1" max="20" step="1">
 </div></section>
@@ -472,15 +474,15 @@ button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:18p
 </div>
 <div class="toast" id="toast"></div>
 <script>
-const ids=['maxSpeed','abMinAlpha','abMaxAlpha','abMinBeta','abMaxBeta','ctrlPeriod','maxStep','posDb','speedDb','lostDelay','lostIter','servoMin','servoMax','servoStep','manualStep','tableLen','plotMax'];
+const ids=['maxSpeed','abMinAlpha','abMaxAlpha','abMinBeta','abMaxBeta','ctrlPeriod','maxStep','posDb','speedDb','stableTime','idleExit','lostDelay','lostIter','servoMin','servoMax','servoStep','manualStep','tableLen','plotMax'];
 const el=Object.fromEntries(ids.map(id=>[id,document.getElementById(id)]));
 const statusEl=document.getElementById('status');
 const saveBtn=document.getElementById('saveBtn');
 const toast=document.getElementById('toast');let toastTimer=null;
 function notify(msg){toast.textContent=msg;toast.style.display='block';if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(()=>toast.style.display='none',3000)}
-function fill(s){el.maxSpeed.value=s.max_control_speed;el.abMinAlpha.value=Number(s.alpha_beta_min_alpha).toFixed(2);el.abMaxAlpha.value=Number(s.alpha_beta_max_alpha).toFixed(2);el.abMinBeta.value=Number(s.alpha_beta_min_beta).toFixed(2);el.abMaxBeta.value=Number(s.alpha_beta_max_beta).toFixed(2);el.ctrlPeriod.value=s.controller_period;el.maxStep.value=s.max_step;el.posDb.value=s.position_deadband;el.speedDb.value=s.speed_deadband;el.lostDelay.value=(Number(s.lost_delay)/1000).toFixed(1);el.lostIter.value=s.lost_iter;el.servoMin.value=s.servo_min;el.servoMax.value=s.servo_max;el.servoStep.value=s.servo_step_us;el.manualStep.value=s.manual_angle_step;el.tableLen.value=s.table_length;el.plotMax.value=s.plot_max_s}
+function fill(s){el.maxSpeed.value=s.max_control_speed;el.abMinAlpha.value=Number(s.alpha_beta_min_alpha).toFixed(2);el.abMaxAlpha.value=Number(s.alpha_beta_max_alpha).toFixed(2);el.abMinBeta.value=Number(s.alpha_beta_min_beta).toFixed(2);el.abMaxBeta.value=Number(s.alpha_beta_max_beta).toFixed(2);el.ctrlPeriod.value=s.controller_period;el.maxStep.value=s.max_step;el.posDb.value=s.position_deadband;el.speedDb.value=s.speed_deadband;el.stableTime.value=s.stable_time;el.idleExit.value=s.idle_exit_percent;el.lostDelay.value=(Number(s.lost_delay)/1000).toFixed(1);el.lostIter.value=s.lost_iter;el.servoMin.value=s.servo_min;el.servoMax.value=s.servo_max;el.servoStep.value=s.servo_step_us;el.manualStep.value=s.manual_angle_step;el.tableLen.value=s.table_length;el.plotMax.value=s.plot_max_s}
 async function load(){try{const r=await fetch('/api/advanced',{cache:'no-store'});fill(await r.json())}catch(e){statusEl.textContent='Load failed.'}}
-function query(){return `max_speed=${el.maxSpeed.value}&ab_min_alpha=${el.abMinAlpha.value}&ab_max_alpha=${el.abMaxAlpha.value}&ab_min_beta=${el.abMinBeta.value}&ab_max_beta=${el.abMaxBeta.value}&ctrl_period=${el.ctrlPeriod.value}&max_step=${el.maxStep.value}&pos_db=${el.posDb.value}&speed_db=${el.speedDb.value}&lost_delay=${Math.round(Number(el.lostDelay.value)*1000)}&lost_iter=${el.lostIter.value}&servo_min=${el.servoMin.value}&servo_max=${el.servoMax.value}&servo_step=${el.servoStep.value}&manual_step=${el.manualStep.value}&table_len=${el.tableLen.value}&plot_max=${el.plotMax.value}`}
+function query(){return `max_speed=${el.maxSpeed.value}&ab_min_alpha=${el.abMinAlpha.value}&ab_max_alpha=${el.abMaxAlpha.value}&ab_min_beta=${el.abMinBeta.value}&ab_max_beta=${el.abMaxBeta.value}&ctrl_period=${el.ctrlPeriod.value}&max_step=${el.maxStep.value}&pos_db=${el.posDb.value}&speed_db=${el.speedDb.value}&stable_time=${el.stableTime.value}&idle_exit=${el.idleExit.value}&lost_delay=${Math.round(Number(el.lostDelay.value)*1000)}&lost_iter=${el.lostIter.value}&servo_min=${el.servoMin.value}&servo_max=${el.servoMax.value}&servo_step=${el.servoStep.value}&manual_step=${el.manualStep.value}&table_len=${el.tableLen.value}&plot_max=${el.plotMax.value}`}
 function num(id){return Number(el[id].value)}
 function inRange(v,min,max){return Number.isFinite(v)&&v>=min&&v<=max}
 function validateAdvanced(){
@@ -490,6 +492,7 @@ function validateAdvanced(){
   if(!inRange(num('abMinBeta'),0,2)||!inRange(num('abMaxBeta'),0,2)||num('abMinBeta')>num('abMaxBeta'))return 'Beta invalide: 0 <= min <= max <= 2.';
   if(!inRange(num('ctrlPeriod'),10,100))return 'La periode du controleur doit etre entre 10 et 100 ms.';
   if(!inRange(num('maxStep'),0,180)||!inRange(num('posDb'),0,50)||!inRange(num('speedDb'),0,300))return 'Parametre PID hors limites.';
+  if(!inRange(num('stableTime'),100,5000)||!inRange(num('idleExit'),100,500))return 'Parametre de detection stable hors limites.';
   if(!inRange(num('lostDelay'),0,10)||!inRange(num('lostIter'),1,20))return 'Parametre de balle perdue hors limites.';
   if(!inRange(sm,0,180)||!inRange(sx,0,180)||sm>=sx)return 'Angles servo invalides: min < max dans la plage 0-180 deg.';
   if(!inRange(num('servoStep'),1,100))return 'Le pas servo doit etre entre 1 et 100 us.';
@@ -1334,6 +1337,8 @@ static void send_state(void) {
   json += "\"servo_angle\":" + String(get_controller_last_angle_deg()) + ",";
   json += "\"stabilization\":" + String(controller_is_enabled() ? "true" : "false") + ",";
   json += "\"controller_valid\":" + String(controller_last_update_was_valid() ? "true" : "false") + ",";
+  json += "\"ball_stable\":" + String(controller_ball_is_stable() ? "true" : "false") + ",";
+  json += "\"controller_idle\":" + String(controller_is_idle() ? "true" : "false") + ",";
   json += "\"ref\":" + String(get_controller_reference_mm()) + ",";
   json += "\"kp\":" + String(kp, 6) + ",";
   json += "\"ki\":" + String(ki, 6) + ",";
@@ -1369,6 +1374,8 @@ static void send_advanced_state(bool ok = true) {
   json += "\"max_step\":" + String(get_controller_max_step_deg()) + ",";
   json += "\"position_deadband\":" + String(get_controller_stabilization_position_deadband_mm()) + ",";
   json += "\"speed_deadband\":" + String(get_controller_stabilization_speed_deadband_mm_s()) + ",";
+  json += "\"stable_time\":" + String(get_controller_stable_time_ms()) + ",";
+  json += "\"idle_exit_percent\":" + String(get_controller_idle_exit_percent()) + ",";
   json += "\"lost_delay\":" + String(get_controller_lost_ball_delay_ms()) + ",";
   json += "\"lost_iter\":" + String(get_controller_lost_ball_iter()) + ",";
   json += "\"servo_min\":" + String(get_servo_min_angle_deg()) + ",";
@@ -1418,6 +1425,14 @@ static bool update_advanced_params_from_request(void) {
 
   if (server.hasArg("speed_db")) {
     ok = set_controller_stabilization_speed_deadband_mm_s(server.arg("speed_db").toInt()) && ok;
+  }
+
+  if (server.hasArg("stable_time")) {
+    ok = set_controller_stable_time_ms((uint32_t)server.arg("stable_time").toInt()) && ok;
+  }
+
+  if (server.hasArg("idle_exit")) {
+    ok = set_controller_idle_exit_percent(server.arg("idle_exit").toInt()) && ok;
   }
 
   if (server.hasArg("lost_delay")) {
@@ -1507,6 +1522,8 @@ static bool advanced_settings_match_saved(void) {
               prefs.getInt("max_step", -1) == get_controller_max_step_deg() &&
               prefs.getInt("pos_db", -1) == get_controller_stabilization_position_deadband_mm() &&
               prefs.getInt("speed_db", -1) == get_controller_stabilization_speed_deadband_mm_s() &&
+              prefs.getUInt("stable_time", UINT32_MAX) == get_controller_stable_time_ms() &&
+              prefs.getInt("idle_exit", -1) == get_controller_idle_exit_percent() &&
               prefs.getUInt("lost_delay", UINT32_MAX) == get_controller_lost_ball_delay_ms() &&
               prefs.getInt("lost_iter", -1) == get_controller_lost_ball_iter() &&
               prefs.getInt("servo_min", -1) == get_servo_min_angle_deg() &&
@@ -1550,6 +1567,8 @@ static bool save_advanced_settings(void) {
   prefs.putInt("max_step", get_controller_max_step_deg());
   prefs.putInt("pos_db", get_controller_stabilization_position_deadband_mm());
   prefs.putInt("speed_db", get_controller_stabilization_speed_deadband_mm_s());
+  prefs.putUInt("stable_time", get_controller_stable_time_ms());
+  prefs.putInt("idle_exit", get_controller_idle_exit_percent());
   prefs.putUInt("lost_delay", get_controller_lost_ball_delay_ms());
   prefs.putInt("lost_iter", get_controller_lost_ball_iter());
   prefs.putInt("servo_min", get_servo_min_angle_deg());
@@ -1588,6 +1607,8 @@ static bool load_advanced_settings(void) {
   int max_step = prefs.getInt("max_step", CONTROLLER_DEFAULT_MAX_STEP_DEG);
   int pos_db = prefs.getInt("pos_db", CONTROLLER_DEFAULT_POSITION_DEADBAND_MM);
   int speed_db = prefs.getInt("speed_db", CONTROLLER_DEFAULT_SPEED_DEADBAND_MM_S);
+  uint32_t stable_time = prefs.getUInt("stable_time", CONTROLLER_DEFAULT_STABLE_TIME_MS);
+  int idle_exit = prefs.getInt("idle_exit", CONTROLLER_DEFAULT_IDLE_EXIT_PERCENT);
   uint32_t lost_delay = prefs.getUInt("lost_delay", CONTROLLER_DEFAULT_LOST_BALL_DELAY_MS);
   int lost_iter = prefs.getInt("lost_iter", CONTROLLER_DEFAULT_LOST_BALL_ITER);
   int servo_min = prefs.getInt("servo_min", SERVO_CMD_MIN_DEG);
@@ -1605,6 +1626,8 @@ static bool load_advanced_settings(void) {
   ok = set_controller_max_step_deg(max_step) && ok;
   ok = set_controller_stabilization_position_deadband_mm(pos_db) && ok;
   ok = set_controller_stabilization_speed_deadband_mm_s(speed_db) && ok;
+  ok = set_controller_stable_time_ms(stable_time) && ok;
+  ok = set_controller_idle_exit_percent(idle_exit) && ok;
   ok = set_controller_lost_ball_delay_ms(lost_delay) && ok;
   ok = set_controller_lost_ball_iter(lost_iter) && ok;
   ok = set_servo_angle_limits(servo_min, servo_max) && ok;
@@ -2317,4 +2340,19 @@ bool launch_interface_web(void) {
   }
 
   return true;
+}
+
+bool load_startup_persistent_settings(void) {
+  bool calibration_loaded = load_draft_from_preferences();
+
+  if (calibration_loaded) {
+    apply_servo_calibration_draft();
+  } else {
+    calibration_servo = ServoCalibrationDraft();
+    apply_servo_calibration_draft();
+  }
+
+  load_advanced_settings();
+  load_controller_settings();
+  return calibration_loaded;
 }
