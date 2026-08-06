@@ -692,6 +692,7 @@ static const char CALIBRATION_HTML[] PROGMEM = R"rawliteral(
 body{margin:0;min-height:100vh;background:#f4f1e8;color:#171717;font-family:Arial,Helvetica,sans-serif;padding:14px}
 .app{width:min(1000px,100%);margin:0 auto;display:grid;gap:12px}.panel{background:#fffdf6;border:3px solid #202020;border-radius:4px;padding:16px}
 h1{font-size:25px;line-height:1.2;margin:0 0 10px}.msg{font-size:18px;line-height:1.45;margin:0 0 12px}.scene{height:330px;position:relative}.scene canvas{width:100%;height:100%;display:block}
+.verifyNav{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:52px;border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:30px;font-weight:900;padding:0;display:none;z-index:2}.verifyNav.show{display:block}.verifyNav.left{left:10px}.verifyNav.right{right:10px}
 .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.dot{width:18px;height:18px;border-radius:50%;background:#b91c1c;border:2px solid #202020}.ok{background:#1f8f45}.bad{background:#b91c1c}
 button{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:20px;font-weight:900;padding:10px 18px;cursor:pointer}button:disabled{opacity:.55;cursor:wait}
 input{height:42px;border:3px solid #202020;background:white;font-size:20px;padding:4px 8px;width:160px}.hint{font-size:14px;color:#666}.hidden{display:none}.err{color:#b91c1c;font-weight:800}
@@ -700,7 +701,7 @@ input{height:42px;border:3px solid #202020;background:white;font-size:20px;paddi
 </head>
 <body>
 <div class="app">
-<section class="panel scene"><canvas id="calScene"></canvas></section>
+<section class="panel scene"><button class="verifyNav left" id="verifyPrevBtn">&lt;</button><canvas id="calScene"></canvas><button class="verifyNav right" id="verifyNextBtn">&gt;</button></section>
 <section class="panel">
 <h1 id="title">Calibration</h1>
 <p class="msg" id="instruction">Chargement...</p>
@@ -720,6 +721,7 @@ input{height:42px;border:3px solid #202020;background:white;font-size:20px;paddi
 <script>
 let TABLE_LEN_MM=290; const REFRESH_MS=80;
 const scene=document.getElementById('calScene'),dot=document.getElementById('dot'),rawTxt=document.getElementById('rawTxt'),tofTxt=document.getElementById('tofTxt'),rawRow=document.getElementById('rawRow');
+const verifyPrevBtn=document.getElementById('verifyPrevBtn'),verifyNextBtn=document.getElementById('verifyNextBtn');
 const title=document.getElementById('title'),instruction=document.getElementById('instruction'),statusEl=document.getElementById('status');
 const realRow=document.getElementById('realRow'),realInput=document.getElementById('realInput');
 const doneBtn=document.getElementById('doneBtn'),submitBtn=document.getElementById('submitBtn'),acceptBtn=document.getElementById('acceptBtn'),restartBtn=document.getElementById('restartBtn'),cancelBtn=document.getElementById('cancelBtn');
@@ -730,25 +732,78 @@ let startupDone=false;
 let realInputEditing=false;
 let lastInputStep='';
 let lastError='';
+let verifyView=null;
+const verifyViews=['both','tof1','tof2'];
 function notify(msg){toast.textContent=msg;toast.style.display='block';if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(()=>toast.style.display='none',3000)}
 function fit(c){const r=c.getBoundingClientRect(),d=window.devicePixelRatio||1;const w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));if(c.width!==w||c.height!==h){c.width=w;c.height=h}}
+function roundedRect(c,x,y,w,h,r){r=Math.min(r,w/2,h/2);c.beginPath();c.moveTo(x+r,y);c.lineTo(x+w-r,y);c.quadraticCurveTo(x+w,y,x+w,y+r);c.lineTo(x+w,y+h-r);c.quadraticCurveTo(x+w,y+h,x+w-r,y+h);c.lineTo(x+r,y+h);c.quadraticCurveTo(x,y+h,x,y+h-r);c.lineTo(x,y+r);c.quadraticCurveTo(x,y,x+r,y);c.closePath()}
+function selectedVerifyTof(){return verifyView==='tof1'?1:(verifyView==='tof2'?2:0)}
+function cycleVerifyView(delta){const i=verifyViews.indexOf(verifyView||'both');verifyView=verifyViews[(i+delta+verifyViews.length)%verifyViews.length];drawScene()}
+function verifyLabel(){return verifyView==='tof1'?'TOF 1 only':verifyView==='tof2'?'TOF 2 only':'TOF 1 + TOF 2'}
+function verifyVisualPosition(){
+  if(s.step!=='verify')return s.visual_pos_mm;
+  if(verifyView==='tof1')return s.tof1_pos_mm;
+  if(verifyView==='tof2')return s.tof2_pos_mm;
+  return s.visual_pos_mm;
+}
+function verifyBallLost(){
+  if(s.step!=='verify')return false;
+  const pos=verifyVisualPosition();
+  return !Number.isFinite(pos)||pos<0;
+}
+function drawCalibrationBadge(c,w,h,text,color){
+  const fs=Math.max(14,w*.02),padX=Math.max(12,w*.014),bh=fs+16;
+  c.save();
+  c.font=`900 ${fs}px Arial`;
+  const bw=c.measureText(text).width+padX*2;
+  const x=w-bw-16,y=16;
+  roundedRect(c,x,y,bw,bh,bh/2);
+  c.fillStyle='#fffdf6';c.fill();
+  c.lineWidth=3;c.strokeStyle=color;c.stroke();
+  c.fillStyle=color;c.textBaseline='middle';
+  c.fillText(text,x+padX,y+bh/2+1);
+  c.restore();
+}
 function drawScene(){
 fit(scene);const c=scene.getContext('2d'),w=scene.width,h=scene.height;c.clearRect(0,0,w,h);c.lineWidth=4;c.strokeStyle='#171717';c.fillStyle='#171717';
 const cx=w*.5,cy=h*.56,len=w*.72,a=0,ux=Math.cos(a),uy=Math.sin(a),nx=0,ny=-1;const x1=cx-len/2,y1=cy,x2=cx+len/2,y2=cy;
 c.beginPath();c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke();c.beginPath();c.moveTo(cx,cy+8);c.lineTo(cx-w*.035,cy+h*.22);c.lineTo(cx+w*.035,cy+h*.22);c.closePath();c.stroke();
-let pos=s.visual_pos_mm; if(!Number.isFinite(pos)||pos<0)pos=TABLE_LEN_MM/2; pos=Math.max(0,Math.min(TABLE_LEN_MM,pos)); const p=pos/TABLE_LEN_MM;
+const ballLost=verifyBallLost();
+let pos=verifyVisualPosition(); if(ballLost||!Number.isFinite(pos)||pos<0)pos=TABLE_LEN_MM/2; pos=Math.max(0,Math.min(TABLE_LEN_MM,pos)); const p=pos/TABLE_LEN_MM;
 const r=Math.max(15,Math.min(w,h)*.045),contactX=x1+(x2-x1)*p,contactY=y1+(y2-y1)*p,bx=contactX+nx*r,by=contactY+ny*r;
-c.beginPath();c.arc(bx,by,r,0,Math.PI*2);c.stroke();c.beginPath();c.moveTo(bx-r*.65,by-r*.65);c.lineTo(bx+r*.65,by+r*.65);c.moveTo(bx+r*.65,by-r*.65);c.lineTo(bx-r*.65,by+r*.65);c.stroke();
+if(ballLost){
+  c.save();
+  c.setLineDash([10,7]);
+  c.strokeStyle='#c43131';
+  c.lineWidth=4;
+  c.beginPath();c.arc(bx,by,r,0,Math.PI*2);c.stroke();
+  c.restore();
+}else{
+  c.beginPath();c.arc(bx,by,r,0,Math.PI*2);c.stroke();c.beginPath();c.moveTo(bx-r*.65,by-r*.65);c.lineTo(bx+r*.65,by+r*.65);c.moveTo(bx+r*.65,by-r*.65);c.lineTo(bx-r*.65,by+r*.65);c.stroke();
+}
 if(s.step==='verify'||String(s.step||'').startsWith('noise')){[0,72,145,218,290].forEach(mm=>{const x=x1+(x2-x1)*(mm/TABLE_LEN_MM);c.strokeStyle='#208444';c.fillStyle='#208444';c.lineWidth=3;c.beginPath();c.moveTo(x,cy+30);c.lineTo(x,cy+70);c.stroke();c.beginPath();c.moveTo(x,cy+24);c.lineTo(x-8,cy+42);c.lineTo(x+8,cy+42);c.closePath();c.fill();c.fillText(`${mm}`,x-10,cy+90)});c.strokeStyle='#171717';c.fillStyle='#171717'}
-if(s.step!=='verify'&&!String(s.step||'').startsWith('noise')&&s.tof){
-  const tx=s.tof===1?x2:x1,dir=s.tof===1?-1:1,ay=cy-76;
+const focusTof=s.step==='verify'?selectedVerifyTof():s.tof;
+if((s.step!=='verify'&&!String(s.step||'').startsWith('noise')&&s.tof)||(s.step==='verify'&&focusTof)){
+  const tx=focusTof===1?x2:x1,dir=focusTof===1?-1:1,ay=cy-76;
   c.strokeStyle='#2457b8';c.fillStyle='#2457b8';c.lineWidth=5;
   c.beginPath();c.moveTo(tx+dir*70,ay);c.lineTo(tx+dir*14,ay);c.stroke();
   c.beginPath();c.moveTo(tx+dir*8,ay);c.lineTo(tx+dir*24,ay-10);c.lineTo(tx+dir*24,ay+10);c.closePath();c.fill();
-  c.font=`${Math.max(13,w*.017)}px Arial`;c.fillText(`TOF ${s.tof}`,tx+dir*42-22,ay-16);
+  c.font=`${Math.max(13,w*.017)}px Arial`;c.fillText(`TOF ${focusTof}`,tx+dir*42-22,ay-16);
+  if(s.step==='verify'){
+    const fovPos=focusTof===1?s.tof1_fov_pos_mm:s.tof2_fov_pos_mm;
+    if(Number.isFinite(fovPos)&&fovPos>=0){
+      const fx=x1+(x2-x1)*(Math.max(0,Math.min(TABLE_LEN_MM,fovPos))/TABLE_LEN_MM);
+      c.strokeStyle='#c43131';c.fillStyle='#c43131';c.lineWidth=4;
+      c.beginPath();c.moveTo(fx,cy-70);c.lineTo(fx,cy-20);c.stroke();
+      c.beginPath();c.moveTo(fx,cy-12);c.lineTo(fx-10,cy-30);c.lineTo(fx+10,cy-30);c.closePath();c.fill();
+      c.font=`${Math.max(12,w*.016)}px Arial`;c.fillText('FOV',fx-16,cy-78);
+    }
+  }
   c.strokeStyle='#171717';c.fillStyle='#171717';
 }
-c.font=`${Math.max(14,w*.018)}px Arial`;c.fillText(`visual pos=${Math.round(pos)} mm`,18,h-22);
+c.font=`${Math.max(14,w*.018)}px Arial`;c.fillText(`visual pos=${Math.round(pos)} mm`,18,h-42);
+if(s.step==='verify'){c.fillText(verifyLabel(),18,h-20)}
+if(ballLost)drawCalibrationBadge(c,w,h,'Ball lost','#c43131');
 }
 function setButtons(){
 const verifyOnly=params.get('verify')==='1';
@@ -758,6 +813,8 @@ doneBtn.classList.toggle('hidden',!s.needs_done);
 submitBtn.classList.toggle('hidden',!s.needs_real_input);
 realRow.classList.toggle('hidden',!s.needs_real_input);
 rawRow.classList.toggle('hidden',verifyStep||noiseStep);
+verifyPrevBtn.classList.toggle('show',verifyStep);
+verifyNextBtn.classList.toggle('show',verifyStep);
 statusEl.classList.toggle('hidden',verifyStep);
 acceptBtn.classList.toggle('hidden',s.step!=='verify'&&s.step!=='noise_done');
 restartBtn.classList.toggle('hidden',false);
@@ -780,6 +837,12 @@ lastInputStep=s.step||'';
 }
 function update(){
 TABLE_LEN_MM=s.table_length||290;
+if(s.step==='verify'&&!verifyView){
+  verifyView=s.default_verify_tof===1?'tof1':s.default_verify_tof===2?'tof2':'both';
+}
+if(s.step!=='verify'){
+  verifyView=null;
+}
 title.textContent=s.title||'Calibration';
 instruction.textContent=s.instruction||'';
 rawTxt.textContent=s.raw_valid?`raw=${s.raw_mm} mm`:'raw invalid';
@@ -808,6 +871,8 @@ submitBtn.onclick=()=>action('cmd=real_fov&value='+encodeURIComponent(realInput.
 acceptBtn.onclick=()=>action('cmd=accept');
 restartBtn.onclick=()=>action('cmd=restart');
 cancelBtn.onclick=()=>action('cmd=cancel');
+verifyPrevBtn.onclick=()=>cycleVerifyView(-1);
+verifyNextBtn.onclick=()=>cycleVerifyView(1);
 window.onresize=drawScene;setInterval(getState,REFRESH_MS);getState();
 </script>
 </body>
@@ -1915,6 +1980,9 @@ static void send_calibration_state(void) {
                    : (noise_index >= 0) ? calibration_noise.position_mm[noise_index]
                    : (calibration_step == CAL_NOISE_DONE) ? get_ball_position()
                    : visual_position_from_raw(tof_number, raw_mm);
+  int tof1_visual_pos = get_ball_position_from_tof(TOF1);
+  int tof2_visual_pos = get_ball_position_from_tof(TOF2);
+  int default_verify_tof = (calibration_step == CAL_VERIFY) ? manual_calibration_target() : 0;
 
   const char *step_name = "unknown";
   const char *title = "Calibration";
@@ -2028,6 +2096,11 @@ static void send_calibration_state(void) {
   json += "\"raw_mm\":" + String(raw_mm) + ",";
   json += "\"raw_valid\":" + String(raw_valid ? "true" : "false") + ",";
   json += "\"visual_pos_mm\":" + String(visual_pos) + ",";
+  json += "\"tof1_pos_mm\":" + String(tof1_visual_pos) + ",";
+  json += "\"tof2_pos_mm\":" + String(tof2_visual_pos) + ",";
+  json += "\"tof1_fov_pos_mm\":" + String(get_tof_fov_position_mm(TOF1)) + ",";
+  json += "\"tof2_fov_pos_mm\":" + String(get_tof_fov_position_mm(TOF2)) + ",";
+  json += "\"default_verify_tof\":" + String(default_verify_tof) + ",";
   json += "\"needs_done\":" + String(needs_done ? "true" : "false") + ",";
   json += "\"needs_real_input\":" + String(needs_real_input ? "true" : "false") + ",";
   json += "\"real_fov\":" + String(real_fov) + ",";

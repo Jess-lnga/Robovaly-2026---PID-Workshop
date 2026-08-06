@@ -29,6 +29,8 @@ bool compute_ball_speed();
 int get_d1();
 int get_d2();
 int get_ball_position();
+int get_ball_position_from_tof(int tof_number);
+int get_tof_fov_position_mm(int tof_number);
 int get_ball_speed();
 bool is_ball_speed_valid();
 

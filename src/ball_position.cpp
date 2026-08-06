@@ -514,6 +514,40 @@ int get_ball_position(){
     return ball_position_mm;
 }
 
+int get_ball_position_from_tof(int tof_number){
+    if(tof_number == TOF1){
+        if(!d1_valid) return -1;
+
+        int d1_corr = linearise_tof_measure(TOF1, d1);
+        if(d1_corr < 0) return -1;
+
+        return clamp_int_local(table_length_mm - d1_corr, 0, table_length_mm);
+    }
+
+    if(tof_number == TOF2){
+        if(!d2_valid) return -1;
+
+        int d2_corr = linearise_tof_measure(TOF2, d2);
+        if(d2_corr < 0) return -1;
+
+        return clamp_int_local(d2_corr, 0, table_length_mm);
+    }
+
+    return -1;
+}
+
+int get_tof_fov_position_mm(int tof_number){
+    if(tof_number == TOF1){
+        return clamp_int_local(table_length_mm - REAL_DISTANCE_AT_FOV1, 0, table_length_mm);
+    }
+
+    if(tof_number == TOF2){
+        return clamp_int_local(REAL_DISTANCE_AT_FOV2, 0, table_length_mm);
+    }
+
+    return -1;
+}
+
 int get_ball_speed(){
     if(speed_valid){
         return ball_speed_mm_per_s;
