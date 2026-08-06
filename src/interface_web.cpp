@@ -495,6 +495,7 @@ button,a{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:22p
 </div>
 <button class="back" onclick="location.href='/calibration?verify=1'">Verify calibration</button>
 <button class="back" onclick="location.href='/calibration?noise=1'">Noise rejection</button>
+<button class="back" onclick="location.href='/calibration?noise_result=1'">Verify noise rejection</button>
 <a class="back" href="/">Retour</a>
 </section>
 </body>
@@ -707,15 +708,32 @@ body{margin:0;min-height:100vh;background:#f4f1e8;color:#171717;font-family:Aria
 .app{width:min(1000px,100%);margin:0 auto;display:grid;gap:12px}.panel{background:#fffdf6;border:3px solid #202020;border-radius:4px;padding:16px}
 h1{font-size:25px;line-height:1.2;margin:0 0 10px}.msg{font-size:18px;line-height:1.45;margin:0 0 12px}.scene{height:330px;position:relative}.scene canvas{width:100%;height:100%;display:block}
 .verifyNav{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:52px;border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:30px;font-weight:900;padding:0;display:none;z-index:2}.verifyNav.show{display:block}.verifyNav.left{left:10px}.verifyNav.right{right:10px}
+.noisePlots{display:grid;grid-template-columns:1fr 1fr;gap:12px}.noisePlot{height:260px;position:relative}.noisePlot canvas{width:100%;height:100%;display:block}.plotLabel{position:absolute;top:8px;right:12px;font-weight:900;text-decoration:underline}.legend{font-size:14px;color:#666;margin-top:8px}.abGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0}.abGrid label{font-size:13px;font-weight:900;display:grid;gap:4px}.abGrid input{width:100%;height:36px;font-size:16px}.abStatus{font-size:13px;color:#666;font-weight:800}
 .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.dot{width:18px;height:18px;border-radius:50%;background:#b91c1c;border:2px solid #202020}.ok{background:#1f8f45}.bad{background:#b91c1c}
 button{border:3px solid #202020;background:#f8f5ea;color:#171717;font-size:20px;font-weight:900;padding:10px 18px;cursor:pointer}button:disabled{opacity:.55;cursor:wait}
 input{height:42px;border:3px solid #202020;background:white;font-size:20px;padding:4px 8px;width:160px}.hint{font-size:14px;color:#666}.hidden{display:none}.err{color:#b91c1c;font-weight:800}
 .toast{position:fixed;right:14px;bottom:14px;max-width:min(420px,calc(100vw - 28px));background:#171717;color:#fffdf6;border:3px solid #202020;padding:10px 14px;font-weight:800;z-index:20;display:none}
+@media(max-width:800px){.noisePlots,.abGrid{grid-template-columns:1fr 1fr}.noisePlot{height:230px}}
 </style>
 </head>
 <body>
 <div class="app">
 <section class="panel scene"><button class="verifyNav left" id="verifyPrevBtn">&lt;</button><canvas id="calScene"></canvas><button class="verifyNav right" id="verifyNextBtn">&gt;</button></section>
+<section class="panel hidden" id="noisePlotPanel">
+<h1>Noise rejection result</h1>
+<div class="abGrid">
+<label>Min alpha<input id="nrMinAlpha" type="number" min="0" max="1" step="0.01"></label>
+<label>Max alpha<input id="nrMaxAlpha" type="number" min="0" max="1" step="0.01"></label>
+<label>Min beta<input id="nrMinBeta" type="number" min="0" max="2" step="0.01"></label>
+<label>Max beta<input id="nrMaxBeta" type="number" min="0" max="2" step="0.01"></label>
+</div>
+<div class="abStatus" id="nrAbStatus">Alpha-beta parameters are applied live.</div>
+<div class="noisePlots">
+<div class="panel noisePlot"><canvas id="noisePosPlot"></canvas><div class="plotLabel">Position</div></div>
+<div class="panel noisePlot"><canvas id="noiseSpeedPlot"></canvas><div class="plotLabel">Speed</div></div>
+</div>
+<div class="legend">Grey: raw fused data | Blue/red: filtered data after noise rejection</div>
+</section>
 <section class="panel">
 <h1 id="title">Calibration</h1>
 <p class="msg" id="instruction">Chargement...</p>
@@ -735,6 +753,8 @@ input{height:42px;border:3px solid #202020;background:white;font-size:20px;paddi
 <script>
 let TABLE_LEN_MM=290; const REFRESH_MS=80;
 const scene=document.getElementById('calScene'),dot=document.getElementById('dot'),rawTxt=document.getElementById('rawTxt'),tofTxt=document.getElementById('tofTxt'),rawRow=document.getElementById('rawRow');
+const noisePlotPanel=document.getElementById('noisePlotPanel'),noisePosPlot=document.getElementById('noisePosPlot'),noiseSpeedPlot=document.getElementById('noiseSpeedPlot');
+const nrMinAlpha=document.getElementById('nrMinAlpha'),nrMaxAlpha=document.getElementById('nrMaxAlpha'),nrMinBeta=document.getElementById('nrMinBeta'),nrMaxBeta=document.getElementById('nrMaxBeta'),nrAbStatus=document.getElementById('nrAbStatus');
 const verifyPrevBtn=document.getElementById('verifyPrevBtn'),verifyNextBtn=document.getElementById('verifyNextBtn');
 const title=document.getElementById('title'),instruction=document.getElementById('instruction'),statusEl=document.getElementById('status');
 const realRow=document.getElementById('realRow'),realInput=document.getElementById('realInput');
@@ -746,7 +766,10 @@ let startupDone=false;
 let realInputEditing=false;
 let lastInputStep='';
 let lastError='';
+let lastStepName='';
 let verifyView=null;
+let nrAlphaBetaLoaded=false,nrApplyTimer=null;
+let noisePlotStart=0,noisePlotLastT=0,noisePlotWasLost=false,noiseLastRawPos=null,noiseLastRawT=0,noisePosData=[],noiseSpeedData=[],noiseLostIntervals=[];
 const verifyViews=['both','tof1','tof2'];
 function notify(msg){toast.textContent=msg;toast.style.display='block';if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(()=>toast.style.display='none',3000)}
 function fit(c){const r=c.getBoundingClientRect(),d=window.devicePixelRatio||1;const w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));if(c.width!==w||c.height!==h){c.width=w;c.height=h}}
@@ -778,6 +801,84 @@ function drawCalibrationBadge(c,w,h,text,color){
   c.fillText(text,x+padX,y+bh/2+1);
   c.restore();
 }
+function resetNoisePlots(){
+  noisePlotStart=performance.now();noisePlotLastT=0;noisePlotWasLost=false;noiseLastRawPos=null;noiseLastRawT=0;noisePosData=[];noiseSpeedData=[];noiseLostIntervals=[];
+}
+function fillNoiseAlphaBeta(){
+  if(nrAlphaBetaLoaded)return;
+  nrMinAlpha.value=Number(s.alpha_beta_min_alpha||0).toFixed(2);
+  nrMaxAlpha.value=Number(s.alpha_beta_max_alpha||0).toFixed(2);
+  nrMinBeta.value=Number(s.alpha_beta_min_beta||0).toFixed(2);
+  nrMaxBeta.value=Number(s.alpha_beta_max_beta||0).toFixed(2);
+  nrAlphaBetaLoaded=true;
+}
+function validNoiseAlphaBeta(){
+  const a0=Number(nrMinAlpha.value),a1=Number(nrMaxAlpha.value),b0=Number(nrMinBeta.value),b1=Number(nrMaxBeta.value);
+  return Number.isFinite(a0)&&Number.isFinite(a1)&&Number.isFinite(b0)&&Number.isFinite(b1)&&a0>=0&&a1<=1&&a0<=a1&&b0>=0&&b1<=2&&b0<=b1;
+}
+async function applyNoiseAlphaBeta(){
+  if(!validNoiseAlphaBeta()){nrAbStatus.textContent='Invalid alpha-beta bounds.';return}
+  nrAbStatus.textContent='Applying...';
+  const q=`ab_min_alpha=${nrMinAlpha.value}&ab_max_alpha=${nrMaxAlpha.value}&ab_min_beta=${nrMinBeta.value}&ab_max_beta=${nrMaxBeta.value}`;
+  try{const r=await fetch('/api/advanced/set?'+q,{cache:'no-store'});const js=await r.json();nrAbStatus.textContent=js.ok?'Applied live.':'Rejected.'}catch(e){nrAbStatus.textContent='Apply failed.'}
+}
+function scheduleNoiseAlphaBetaApply(){if(nrApplyTimer)clearTimeout(nrApplyTimer);nrApplyTimer=setTimeout(applyNoiseAlphaBeta,250)}
+function trimNoisePlots(t){
+  const minT=Math.max(0,t-10);
+  noisePosData=noisePosData.filter(d=>d.t>=minT);
+  noiseSpeedData=noiseSpeedData.filter(d=>d.t>=minT);
+  noiseLostIntervals=noiseLostIntervals.filter(iv=>(iv.end==null?t:iv.end)>=minT);
+}
+function updateNoiseLostIntervals(t,lost){
+  if(lost&&!noisePlotWasLost)noiseLostIntervals.push({start:t,end:null});
+  else if(!lost&&noisePlotWasLost&&noiseLostIntervals.length)noiseLostIntervals[noiseLostIntervals.length-1].end=t;
+  if(lost!==noisePlotWasLost){
+    noisePosData.push({t,raw:NaN,filtered:NaN,lost:true,gap:true});
+    noiseSpeedData.push({t,raw:NaN,filtered:NaN,lost:true,gap:true});
+  }
+  noisePlotWasLost=lost;
+}
+function addNoisePlotSample(){
+  if(s.step!=='noise_done')return;
+  const t=(performance.now()-noisePlotStart)/1000;
+  noisePlotLastT=t;
+  const lost=!Number.isFinite(Number(s.visual_pos_mm))||Number(s.visual_pos_mm)<0||!Number.isFinite(Number(s.raw_pos_mm))||Number(s.raw_pos_mm)<0;
+  updateNoiseLostIntervals(t,lost);
+  let rawSpeed=NaN;
+  const rawPos=Number(s.raw_pos_mm);
+  if(!lost&&noiseLastRawPos!==null&&t>noiseLastRawT){
+    rawSpeed=(rawPos-noiseLastRawPos)/(t-noiseLastRawT);
+  }
+  if(!lost){noiseLastRawPos=rawPos;noiseLastRawT=t}else{noiseLastRawPos=null;noiseLastRawT=t}
+  noisePosData.push({t,raw:lost?NaN:rawPos,filtered:lost?NaN:Number(s.visual_pos_mm),lost});
+  noiseSpeedData.push({t,raw:lost?NaN:rawSpeed,filtered:lost||!s.speed_valid?NaN:Number(s.speed_mm_s),lost});
+  trimNoisePlots(t);
+}
+function drawNoisePlot(canvas,data,label,color){
+  fit(canvas);const c=canvas.getContext('2d'),w=canvas.width,h=canvas.height,p=44;c.clearRect(0,0,w,h);
+  const tNow=noisePlotLastT,xStart=Math.max(0,tNow-10),xEnd=Math.max(10,tNow);
+  let vals=[];data.forEach(d=>{if(Number.isFinite(d.raw))vals.push(d.raw);if(Number.isFinite(d.filtered))vals.push(d.filtered)});
+  let ymin=label==='pos'?0:-100,ymax=label==='pos'?TABLE_LEN_MM:100;
+  if(label==='speed'&&vals.length){const m=Math.max(100,...vals.map(v=>Math.abs(v)));ymax=Math.ceil(m/50)*50;ymin=-ymax}
+  const xOf=t=>p+((t-xStart)/(xEnd-xStart))*(w-p-18),yOf=v=>h-p-(v-ymin)/(ymax-ymin)*(h-p-16);
+  noiseLostIntervals.forEach(iv=>{const end=iv.end==null?tNow:iv.end,a=Math.max(iv.start,xStart),b=Math.min(end,xEnd);if(b>a){c.fillStyle='rgba(196,49,49,.24)';c.fillRect(xOf(a),12,xOf(b)-xOf(a),h-p-12)}});
+  c.lineWidth=3;c.strokeStyle='#171717';c.beginPath();c.moveTo(p,12);c.lineTo(p,h-p);c.lineTo(w-12,h-p);c.stroke();
+  function ref(v,text){if(v<ymin||v>ymax)return;c.save();c.setLineDash([10,8]);c.strokeStyle='#555';c.lineWidth=2;const y=yOf(v);c.beginPath();c.moveTo(p,y);c.lineTo(w-12,y);c.stroke();c.restore();c.fillStyle='#555';c.font=`${Math.max(11,w*.021)}px Arial`;c.fillText(text,p+8,y-6)}
+  if(label==='pos')ref(s.visual_target_mm||145,`${s.visual_target_mm||145} mm`);else ref(0,'0 mm/s');
+  function line(key,stroke){c.strokeStyle=stroke;c.lineWidth=key==='raw'?3:4;c.beginPath();let drawing=false;data.forEach(d=>{const v=d[key];if(d.lost||!Number.isFinite(v)||d.t<xStart||d.t>xEnd){drawing=false;return}const x=xOf(d.t),y=yOf(v);if(!drawing){c.moveTo(x,y);drawing=true}else c.lineTo(x,y)});c.stroke()}
+  line('raw','#777');line('filtered',color);
+  c.fillStyle='#171717';c.font=`${Math.max(12,w*.025)}px Arial`;c.fillText(`${label} | ${Math.round(xStart)}-${Math.round(xEnd)}s`,p+8,24);
+  if(label==='speed'){
+    const rawVals=data.map(d=>d.raw).filter(Number.isFinite);
+    const filteredVals=data.map(d=>d.filtered).filter(Number.isFinite);
+    c.font=`${Math.max(11,w*.02)}px Arial`;
+    c.fillStyle='#777';
+    if(rawVals.length)c.fillText(`raw min ${Math.min(...rawVals).toFixed(0)} / max ${Math.max(...rawVals).toFixed(0)} mm/s`,p+8,h-26);
+    c.fillStyle=color;
+    if(filteredVals.length)c.fillText(`filtered min ${Math.min(...filteredVals).toFixed(0)} / max ${Math.max(...filteredVals).toFixed(0)} mm/s`,p+8,h-10);
+  }
+}
+function drawNoisePlots(){drawNoisePlot(noisePosPlot,noisePosData,'pos','#2457b8');drawNoisePlot(noiseSpeedPlot,noiseSpeedData,'speed','#c43131')}
 function drawScene(){
 fit(scene);const c=scene.getContext('2d'),w=scene.width,h=scene.height;c.clearRect(0,0,w,h);c.lineWidth=4;c.strokeStyle='#171717';c.fillStyle='#171717';
 const cx=w*.5,cy=h*.56,len=w*.72,a=0,ux=Math.cos(a),uy=Math.sin(a),nx=0,ny=-1;const x1=cx-len/2,y1=cy,x2=cx+len/2,y2=cy;
@@ -823,17 +924,19 @@ function setButtons(){
 const verifyOnly=params.get('verify')==='1';
 const verifyStep=s.step==='verify';
 const noiseStep=String(s.step||'').startsWith('noise');
+const noiseDone=s.step==='noise_done';
 doneBtn.classList.toggle('hidden',!s.needs_done);
 submitBtn.classList.toggle('hidden',!s.needs_real_input);
 realRow.classList.toggle('hidden',!s.needs_real_input);
 rawRow.classList.toggle('hidden',verifyStep||noiseStep);
+noisePlotPanel.classList.toggle('hidden',!noiseDone);
 verifyPrevBtn.classList.toggle('show',verifyStep);
 verifyNextBtn.classList.toggle('show',verifyStep);
 statusEl.classList.toggle('hidden',verifyStep);
 acceptBtn.classList.toggle('hidden',s.step!=='verify'&&s.step!=='noise_done');
 restartBtn.classList.toggle('hidden',false);
 cancelBtn.classList.toggle('hidden',params.get('initial')==='1');
-if(verifyOnly){
+if(verifyOnly||params.get('noise_result')==='1'){
   doneBtn.classList.remove('hidden');
   submitBtn.classList.add('hidden');
   acceptBtn.classList.add('hidden');
@@ -851,6 +954,11 @@ lastInputStep=s.step||'';
 }
 function update(){
 TABLE_LEN_MM=s.table_length||290;
+if(s.step!==lastStepName){
+  if(s.step==='noise_done'){resetNoisePlots();nrAlphaBetaLoaded=false}
+  lastStepName=s.step||'';
+}
+if(s.step==='noise_done')fillNoiseAlphaBeta();
 if(s.step==='verify'&&!verifyView){
   verifyView=s.default_verify_tof===1?'tof1':s.default_verify_tof===2?'tof2':'both';
 }
@@ -866,6 +974,7 @@ if(s.error)statusEl.innerHTML=`<span class="err">${s.error}</span>`;else statusE
 if(s.error&&s.error!==lastError)notify(s.error);
 lastError=s.error||'';
 setButtons();drawScene();
+if(s.step==='noise_done'){addNoisePlotSample();drawNoisePlots()}
 }
 async function ensureStarted(){
 if(startupDone)return;
@@ -873,6 +982,7 @@ startupDone=true;
 if(params.get('initial')==='1'||params.get('after_servo')==='1')await fetch('/api/calibration/action?cmd=start&mode=initial_tofs',{cache:'no-store'});
 else if(params.get('verify')==='1')await fetch('/api/calibration/action?cmd=start&mode=verify',{cache:'no-store'});
 else if(params.get('noise')==='1')await fetch('/api/calibration/action?cmd=start&mode=noise',{cache:'no-store'});
+else if(params.get('noise_result')==='1')await fetch('/api/calibration/action?cmd=start&mode=noise_result',{cache:'no-store'});
 else if(params.get('target')==='1')await fetch('/api/calibration/action?cmd=start&target=1',{cache:'no-store'});
 else if(params.get('target')==='2')await fetch('/api/calibration/action?cmd=start&target=2',{cache:'no-store'});
 }
@@ -880,14 +990,15 @@ async function getState(){try{await ensureStarted();const r=await fetch('/api/ca
 async function action(q){doneBtn.disabled=submitBtn.disabled=acceptBtn.disabled=restartBtn.disabled=cancelBtn.disabled=true;try{const r=await fetch('/api/calibration/action?'+q,{cache:'no-store'});s=await r.json();update();if(s.done)setTimeout(()=>{location.href='/'},600)}catch(e){statusEl.textContent='Erreur action';notify('Erreur reseau.')}doneBtn.disabled=submitBtn.disabled=acceptBtn.disabled=restartBtn.disabled=cancelBtn.disabled=false}
 realInput.onfocus=()=>{realInputEditing=true};
 realInput.onblur=()=>{realInputEditing=false};
-doneBtn.onclick=()=>{if(params.get('verify')==='1')location.href='/calibration_select';else action('cmd=done')};
+doneBtn.onclick=()=>{if(params.get('verify')==='1'||params.get('noise_result')==='1')location.href='/calibration_select';else action('cmd=done')};
 submitBtn.onclick=()=>action('cmd=real_fov&value='+encodeURIComponent(realInput.value||'145'));
 acceptBtn.onclick=()=>action('cmd=accept');
 restartBtn.onclick=()=>action('cmd=restart');
 cancelBtn.onclick=()=>action('cmd=cancel');
 verifyPrevBtn.onclick=()=>cycleVerifyView(-1);
 verifyNextBtn.onclick=()=>cycleVerifyView(1);
-window.onresize=drawScene;setInterval(getState,REFRESH_MS);getState();
+[nrMinAlpha,nrMaxAlpha,nrMinBeta,nrMaxBeta].forEach(el=>{el.oninput=scheduleNoiseAlphaBetaApply});
+window.onresize=()=>{drawScene();if(s.step==='noise_done')drawNoisePlots()};setInterval(getState,REFRESH_MS);getState();
 </script>
 </body>
 </html>
@@ -1377,6 +1488,25 @@ static void start_noise_calibration(bool manual_mode) {
     calibration_step = CAL_ERROR;
     distance_sensors_calibrated = false;
     calibration_error_msg = "Aucune calibration TOF sauvegardee. Faites la calibration initiale avant le bruit.";
+  }
+}
+
+static void start_noise_result_view(void) {
+  calibration_error_msg = "";
+  calibration_flow_done = false;
+  calibration_mode = CAL_MODE_NOISE_ONLY;
+  calibration_step = CAL_NOISE_DONE;
+  set_controller_enabled(false);
+
+  if (load_draft_from_preferences()) {
+    apply_draft_calibration(TOF1);
+    apply_draft_calibration(TOF2);
+    apply_servo_calibration_draft();
+    distance_sensors_calibrated = true;
+  } else {
+    calibration_step = CAL_ERROR;
+    distance_sensors_calibrated = false;
+    calibration_error_msg = "Aucun resultat de rejection du bruit sauvegarde.";
   }
 }
 
@@ -2036,6 +2166,14 @@ static void handle_servo_calibration_action(void) {
 }
 
 static void send_calibration_state(void) {
+  update_tof_distances();
+  compute_ball_position();
+  float ab_min_alpha = 0.0f;
+  float ab_max_alpha = 0.0f;
+  float ab_min_beta = 0.0f;
+  float ab_max_beta = 0.0f;
+  get_alpha_beta_parameters(&ab_min_alpha, &ab_max_alpha, &ab_min_beta, &ab_max_beta);
+
   int tof_number = current_calibration_tof();
   int raw_mm = (tof_number == 0) ? -1 : raw_tof_value(tof_number);
   bool raw_valid = raw_tof_is_valid(raw_mm);
@@ -2044,6 +2182,9 @@ static void send_calibration_state(void) {
                    : (noise_index >= 0) ? calibration_noise.position_mm[noise_index]
                    : (calibration_step == CAL_NOISE_DONE) ? get_ball_position()
                    : visual_position_from_raw(tof_number, raw_mm);
+  int visual_target = (noise_index >= 0) ? calibration_noise.position_mm[noise_index]
+                      : (calibration_step == CAL_NOISE_DONE) ? get_controller_reference_mm()
+                      : 145;
   int tof1_visual_pos = get_ball_position_from_tof(TOF1);
   int tof2_visual_pos = get_ball_position_from_tof(TOF2);
   int default_verify_tof = (calibration_step == CAL_VERIFY) ? manual_calibration_target() : 0;
@@ -2160,6 +2301,14 @@ static void send_calibration_state(void) {
   json += "\"raw_mm\":" + String(raw_mm) + ",";
   json += "\"raw_valid\":" + String(raw_valid ? "true" : "false") + ",";
   json += "\"visual_pos_mm\":" + String(visual_pos) + ",";
+  json += "\"raw_pos_mm\":" + String(get_ball_position_raw()) + ",";
+  json += "\"speed_mm_s\":" + String(get_ball_speed()) + ",";
+  json += "\"speed_valid\":" + String(is_ball_speed_valid() ? "true" : "false") + ",";
+  json += "\"visual_target_mm\":" + String(visual_target) + ",";
+  json += "\"alpha_beta_min_alpha\":" + String(ab_min_alpha, 4) + ",";
+  json += "\"alpha_beta_max_alpha\":" + String(ab_max_alpha, 4) + ",";
+  json += "\"alpha_beta_min_beta\":" + String(ab_min_beta, 4) + ",";
+  json += "\"alpha_beta_max_beta\":" + String(ab_max_beta, 4) + ",";
   json += "\"tof1_pos_mm\":" + String(tof1_visual_pos) + ",";
   json += "\"tof2_pos_mm\":" + String(tof2_visual_pos) + ",";
   json += "\"tof1_fov_pos_mm\":" + String(get_tof_fov_position_mm(TOF1)) + ",";
@@ -2190,6 +2339,8 @@ static void handle_calibration_action(void) {
       start_verify_calibration();
     } else if (server.arg("mode") == "noise") {
       start_noise_calibration(true);
+    } else if (server.arg("mode") == "noise_result") {
+      start_noise_result_view();
     } else if (server.arg("target").toInt() == TOF1) {
       start_manual_calibration(TOF1);
     } else if (server.arg("target").toInt() == TOF2) {

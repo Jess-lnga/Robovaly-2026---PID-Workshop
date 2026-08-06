@@ -533,6 +533,10 @@ int get_ball_position(){
     return ball_position_mm;
 }
 
+int get_ball_position_raw(){
+    return ball_position_raw_mm;
+}
+
 int get_ball_position_from_tof(int tof_number){
     if(tof_number == TOF1){
         if(!d1_valid) return -1;
