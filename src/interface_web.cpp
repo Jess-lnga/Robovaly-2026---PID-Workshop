@@ -34,6 +34,7 @@ static const int PLOT_MAX_MAX_SECONDS = 50;
 static const int MANUAL_ANGLE_DEFAULT_STEP_DEG = 5;
 static const int MANUAL_ANGLE_MIN_STEP_DEG = 1;
 static const int MANUAL_ANGLE_MAX_STEP_DEG = 30;
+static const int NOISE_CAPTURE_TARGET_TOLERANCE_MM = 15;
 
 static WebServer server(80);
 static TaskHandle_t web_task_handle = nullptr;
@@ -158,8 +159,11 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 .plotModeBtn{border:3px solid var(--line);background:#f8f5ea;font-weight:900;font-size:16px;padding:8px 12px;vertical-align:middle}
 .plotModeBtn.active{background:#171717;color:#fffdf6}
 .toast{position:fixed;right:14px;bottom:14px;max-width:min(420px,calc(100vw - 28px));background:#171717;color:#fffdf6;border:3px solid var(--line);padding:10px 14px;font-weight:800;z-index:20;display:none}
-.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.plotBox{height:300px;position:relative}.plotBox canvas{width:100%;height:100%}
-.plotLabel{position:absolute;top:8px;right:50px;font-weight:800;text-decoration:underline}.plotBtn{position:absolute;top:8px;right:8px;width:34px;height:30px;border:3px solid var(--line);background:#f8f5ea;font-weight:900}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.plotBox{height:320px;position:relative}.plotBox canvas{width:100%;height:100%}
+.plotLabel{position:absolute;top:8px;right:12px;font-weight:800;text-decoration:underline}
+.plotTune{position:absolute;left:8px;right:8px;top:38px;z-index:2;display:flex;gap:5px;align-items:center;justify-content:center;flex-wrap:nowrap}
+.tuneGroup{display:flex;gap:3px;align-items:center;white-space:nowrap}.tuneGroup span{font-size:10px;font-weight:900}.tuneValue{border:2px solid var(--line);background:white;width:38px;height:22px;display:grid;place-items:center;font-size:12px;font-weight:900}
+.tuneBtn,.tuneSave{height:22px;border:2px solid var(--line);background:#f8f5ea;font-weight:900;padding:0}.tuneBtn{width:22px;font-size:15px;line-height:1}.tuneSave{font-size:10px;padding:0 5px}
 .controls{display:grid;grid-template-columns:1fr 1fr;gap:10px}.formGrid{display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:center}
 .saveRow{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}.saveBtn{border:3px solid var(--line);background:#f8f5ea;font-weight:900;font-size:16px;padding:8px 12px}
 label{font-weight:800}.field{height:38px;border:3px solid var(--line);background:white;font-size:18px;padding:3px 8px;width:100%}
@@ -168,13 +172,12 @@ label{font-weight:800}.field{height:38px;border:3px solid var(--line);background
 .manualBtn{width:52px;height:52px;border:3px solid var(--line);background:#f8f5ea;font-size:30px;font-weight:900;padding:0}.angleBox{height:52px;border:3px solid var(--line);background:white;display:grid;place-items:center;font-size:28px;font-weight:900}
 .small{font-size:13px;color:var(--muted);margin-top:8px}.status{display:flex;gap:16px;flex-wrap:wrap;font-size:14px;color:var(--muted)}
 button{cursor:pointer}button:disabled,input:disabled{opacity:.5;cursor:not-allowed}
-@media(max-width:800px){.grid,.controls{grid-template-columns:1fr}.sceneWrap{height:34vh}.plotBox{height:240px}}
+@media(max-width:800px){.grid,.controls{grid-template-columns:1fr}.sceneWrap{height:34vh}.plotBox{height:260px}.plotTune{top:34px}.tuneGroup span{font-size:10px}}
 </style>
 </head>
 <body>
 <div class="app">
   <div class="panel sceneWrap">
-    <button class="topBtn" id="scenePause">||</button>
     <button class="gearBtn" id="settingsBtn">&#9881;</button>
     <div class="settingsMenu" id="settingsMenu">
       <button class="menuBtn" id="calibrateBtn">Calibrate TOFs</button>
@@ -190,9 +193,17 @@ button{cursor:pointer}button:disabled,input:disabled{opacity:.5;cursor:not-allow
       <div class="plotActions"><button class="toggle" id="plotToggle">Go</button><button class="plotModeBtn" id="continuousPlotBtn">Continuous plot</button></div>
     </div>
     <div class="grid">
-      <div class="panel plotBox"><canvas id="anglePlot"></canvas><div class="plotLabel">Angle</div><button class="plotBtn" id="anglePause">||</button></div>
-      <div class="panel plotBox"><canvas id="posPlot"></canvas><div class="plotLabel">Pos</div><button class="plotBtn" id="posPause">||</button></div>
-      <div class="panel plotBox"><canvas id="speedPlot"></canvas><div class="plotLabel">Speed</div><button class="plotBtn" id="speedPause">||</button></div>
+      <div class="panel plotBox"><canvas id="anglePlot"></canvas><div class="plotLabel">Angle</div></div>
+      <div class="panel plotBox"><canvas id="posPlot"></canvas><div class="plotLabel">Pos</div><div class="plotTune">
+        <div class="tuneGroup"><span>min alpha</span><button class="tuneBtn" id="alphaMinMinus">-</button><div class="tuneValue" id="alphaMinTxt">--</div><button class="tuneBtn" id="alphaMinPlus">+</button></div>
+        <div class="tuneGroup"><span>max alpha</span><button class="tuneBtn" id="alphaMaxMinus">-</button><div class="tuneValue" id="alphaMaxTxt">--</div><button class="tuneBtn" id="alphaMaxPlus">+</button></div>
+        <button class="tuneSave" id="alphaSaveBtn">Save</button>
+      </div></div>
+      <div class="panel plotBox"><canvas id="speedPlot"></canvas><div class="plotLabel">Speed</div><div class="plotTune">
+        <div class="tuneGroup"><span>min beta</span><button class="tuneBtn" id="betaMinMinus">-</button><div class="tuneValue" id="betaMinTxt">--</div><button class="tuneBtn" id="betaMinPlus">+</button></div>
+        <div class="tuneGroup"><span>max beta</span><button class="tuneBtn" id="betaMaxMinus">-</button><div class="tuneValue" id="betaMaxTxt">--</div><button class="tuneBtn" id="betaMaxPlus">+</button></div>
+        <button class="tuneSave" id="betaSaveBtn">Save</button>
+      </div></div>
     </div>
     <div class="small" id="plotInfo">Plot stopped. Press Go to start a capture.</div>
   </div>
@@ -227,16 +238,19 @@ button{cursor:pointer}button:disabled,input:disabled{opacity:.5;cursor:not-allow
 <script>
 let TABLE_LEN_MM=290, PLOT_MAX_S=30; const REFRESH_MS=55;
 const scene=document.getElementById('scene'), anglePlot=document.getElementById('anglePlot'), posPlot=document.getElementById('posPlot'), speedPlot=document.getElementById('speedPlot');
-const scenePause=document.getElementById('scenePause'), plotToggle=document.getElementById('plotToggle'), continuousPlotBtn=document.getElementById('continuousPlotBtn'), plotInfo=document.getElementById('plotInfo');
+const plotToggle=document.getElementById('plotToggle'), continuousPlotBtn=document.getElementById('continuousPlotBtn'), plotInfo=document.getElementById('plotInfo');
 const toast=document.getElementById('toast');
 const settingsBtn=document.getElementById('settingsBtn'), settingsMenu=document.getElementById('settingsMenu'), calibrateBtn=document.getElementById('calibrateBtn'), calibrateServoBtn=document.getElementById('calibrateServoBtn'), advancedBtn=document.getElementById('advancedBtn');
-const anglePause=document.getElementById('anglePause'), posPause=document.getElementById('posPause'), speedPause=document.getElementById('speedPause');
 const stabToggle=document.getElementById('stabToggle'), manualMinusBtn=document.getElementById('manualMinusBtn'), manualPlusBtn=document.getElementById('manualPlusBtn'), manualAngleTxt=document.getElementById('manualAngleTxt');
 const refInput=document.getElementById('refInput'), kpInput=document.getElementById('kpInput'), kiInput=document.getElementById('kiInput'), kdInput=document.getElementById('kdInput');
 const saveValuesBtn=document.getElementById('saveValuesBtn'), resetValuesBtn=document.getElementById('resetValuesBtn'), neutralBtn=document.getElementById('neutralBtn'), saveStatus=document.getElementById('saveStatus');
 const servoTxt=document.getElementById('servoTxt'), tableTxt=document.getElementById('tableTxt'), xTxt=document.getElementById('xTxt'), vTxt=document.getElementById('vTxt'), d1Txt=document.getElementById('d1Txt'), d2Txt=document.getElementById('d2Txt');
-let state={x:-1,v:0,speed_valid:false,servo_angle:90,stabilization:true,controller_valid:false,ball_stable:false,kp:0,ki:0,kd:0,ref:150,d1:-1,d2:-1,servo_min:0,servo_max:180,servo_neutral:90,servo_theoretical_min:0,servo_theoretical_max:180,manual_angle_step:5};
-let sceneFrozen=false, plotRunning=false, continuousPlot=false, angleFrozen=false, posFrozen=false, speedFrozen=false, plotStart=0, plotLastT=0, angleData=[], posData=[], speedData=[], lostIntervals=[], lastBallFoundPlotT=0, plotWasLost=false, lastStab=true, editing=false, neutralTimer=null;
+const alphaMinTxt=document.getElementById('alphaMinTxt'),alphaMaxTxt=document.getElementById('alphaMaxTxt'),betaMinTxt=document.getElementById('betaMinTxt'),betaMaxTxt=document.getElementById('betaMaxTxt');
+const alphaMinMinus=document.getElementById('alphaMinMinus'),alphaMinPlus=document.getElementById('alphaMinPlus'),alphaMaxMinus=document.getElementById('alphaMaxMinus'),alphaMaxPlus=document.getElementById('alphaMaxPlus'),alphaSaveBtn=document.getElementById('alphaSaveBtn');
+const betaMinMinus=document.getElementById('betaMinMinus'),betaMinPlus=document.getElementById('betaMinPlus'),betaMaxMinus=document.getElementById('betaMaxMinus'),betaMaxPlus=document.getElementById('betaMaxPlus'),betaSaveBtn=document.getElementById('betaSaveBtn');
+let state={x:-1,v:0,speed_valid:false,servo_angle:90,stabilization:true,controller_valid:false,ball_stable:false,kp:0,ki:0,kd:0,ref:150,d1:-1,d2:-1,servo_min:0,servo_max:180,servo_neutral:90,servo_theoretical_min:0,servo_theoretical_max:180,manual_angle_step:5,alpha_beta_min_alpha:.3,alpha_beta_max_alpha:.85,alpha_beta_min_beta:.08,alpha_beta_max_beta:.6};
+let plotRunning=false, continuousPlot=false, plotStart=0, plotLastT=0, angleData=[], posData=[], speedData=[], lostIntervals=[], lastBallFoundPlotT=0, plotWasLost=false, lastStab=true, editing=false, neutralTimer=null, tuneSaveTimer=null, tuneLocalUntil=0;
+let tuneDraft=null,tuneApplying=false;
 let toastTimer=null;
 function notify(msg){if(!toast)return;toast.textContent=msg;toast.style.display='block';if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(()=>toast.style.display='none',2600)}
 function fit(c){const r=c.getBoundingClientRect(),d=window.devicePixelRatio||1;const w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));if(c.width!==w||c.height!==h){c.width=w;c.height=h}}
@@ -301,15 +315,24 @@ if(state.x>=0){
   c.restore();
 }
 c.font=`${Math.max(14,w*.018)}px Arial`;
-c.fillText(`x=${state.x} mm`,18,h-44);
-c.fillText(`servo=${state.servo_angle} deg / table=${tableDeg.toFixed(1)} deg`,18,h-20);
+c.fillText(`x=${state.x} mm`,18,h-76);
+c.fillText(`servo=${state.servo_angle} deg / table=${tableDeg.toFixed(1)} deg`,18,h-24);
 drawStatusBadge(c,w,h);
 }
 function scaleMax(t){return Math.min(PLOT_MAX_S,Math.max(10,Math.ceil(Math.max(0.001,t)/10)*10))}
+function windowStats(data,label,xStart,xEnd){
+  const vals=data.filter(d=>d.t>=xStart&&d.t<=xEnd&&!d.lost&&Number.isFinite(d.y)).map(d=>Number(d.y));
+  if(!vals.length)return null;
+  const min=Math.min(...vals),max=Math.max(...vals),mean=vals.reduce((a,b)=>a+b,0)/vals.length;
+  const variance=vals.reduce((a,b)=>a+(b-mean)*(b-mean),0)/vals.length;
+  const std=Math.sqrt(variance);
+  return {min,max,mean,std,unit:label==='angle'?'deg':label==='pos'?'mm':'mm/s'};
+}
 function drawPlot(canvas,data,color,label,freeze){
 fit(canvas);
 const c=canvas.getContext('2d'),w=canvas.width,h=canvas.height,p=44;
 c.clearRect(0,0,w,h);
+const topPad=138;
 const tNow=plotRunning?(performance.now()-plotStart)/1000:plotLastT;
 const xStart=continuousPlot&&tNow>PLOT_MAX_S?tNow-PLOT_MAX_S:0;
 const xEnd=continuousPlot&&tNow>PLOT_MAX_S?tNow:scaleMax(tNow);
@@ -330,7 +353,7 @@ else if(vals.length&&label!=='pos'){
   ymax=Math.max(90,...vals)+5;
   if(ymax-ymin<20){ymin-=10;ymax+=10}
 }
-const yOf=v=>h-p-(v-ymin)/(ymax-ymin)*(h-p-16);
+const yOf=v=>h-p-(v-ymin)/(ymax-ymin)*(h-p-topPad);
 const xOf=t=>p+((t-xStart)/(xEnd-xStart))*(w-p-18);
 if(label==='pos'||label==='speed'){
   lostIntervals.forEach(iv=>{
@@ -339,13 +362,13 @@ if(label==='pos'||label==='speed'){
     if(b>a){
       c.save();
       c.fillStyle='rgba(196,49,49,.24)';
-      c.fillRect(xOf(a),12,xOf(b)-xOf(a),h-p-12);
+      c.fillRect(xOf(a),topPad,xOf(b)-xOf(a),h-p-topPad);
       c.restore();
     }
   });
 }
 c.lineWidth=3;c.strokeStyle='#171717';
-c.beginPath();c.moveTo(p,12);c.lineTo(p,h-p);c.lineTo(w-12,h-p);c.stroke();
+c.beginPath();c.moveTo(p,topPad);c.lineTo(p,h-p);c.lineTo(w-12,h-p);c.stroke();
 function dashedRef(value,text){
   if(value<ymin||value>ymax)return;
   const y=yOf(value);
@@ -376,16 +399,22 @@ data.forEach(d=>{
 c.stroke();
 c.fillStyle='#171717';
 c.font=`${Math.max(12,w*.025)}px Arial`;
-c.fillText(`${label} | ${Math.round(xStart)}-${Math.round(xEnd)}s`,p+8,24);
-if(vals.length)c.fillText(`${vals[vals.length-1].toFixed(1)}`,w-90,24);
-if(label==='speed'&&vals.length){
-  const mn=Math.min(...vals),mx=Math.max(...vals);
-  c.font=`${Math.max(11,w*.021)}px Arial`;
-  c.fillText(`min ${mn.toFixed(0)} / max ${mx.toFixed(0)} mm/s`,p+8,h-12);
+c.fillText(`${label} | ${Math.round(xStart)}-${Math.round(xEnd)}s`,p+8,topPad+12);
+if(vals.length)c.fillText(`${vals[vals.length-1].toFixed(1)}`,w-90,topPad+12);
+const stats=windowStats(data,label,xStart,xEnd);
+if(stats){
+  c.font=`${Math.max(11,w*.017)}px Arial`;
+  c.fillStyle=color;
+  const y=h-11,span=(w-p-22)/4;
+  c.fillText(`min ${stats.min.toFixed(1)} ${stats.unit}`,p+4,y);
+  c.fillText(`max ${stats.max.toFixed(1)} ${stats.unit}`,p+4+span,y);
+  c.fillText(`mean ${stats.mean.toFixed(1)} ${stats.unit}`,p+4+span*2,y);
+  c.fillText(`std ${stats.std.toFixed(1)} ${stats.unit}`,p+4+span*3,y);
 }
 }
-function drawAll(){if(!sceneFrozen)drawScene();if(!angleFrozen)drawPlot(anglePlot,angleData,'#c43131','angle',false);if(!posFrozen)drawPlot(posPlot,posData,'#2457b8','pos',false);if(!speedFrozen)drawPlot(speedPlot,speedData,'#208444','speed',false)}
-function updateTexts(){if(state.stabilization&&neutralTimer){clearInterval(neutralTimer);neutralTimer=null}servoTxt.textContent=state.servo_angle;manualAngleTxt.textContent=state.servo_angle;tableTxt.textContent=(state.servo_angle-state.servo_neutral).toFixed(1);xTxt.textContent=state.x>=0?state.x:'--';vTxt.textContent=state.speed_valid?state.v:'--';d1Txt.textContent=state.d1>=0?state.d1:'--';d2Txt.textContent=state.d2>=0?state.d2:'--';stabToggle.textContent=state.stabilization?'||':'▶';manualMinusBtn.disabled=state.stabilization;manualPlusBtn.disabled=state.stabilization;neutralBtn.disabled=state.stabilization;if(!editing){refInput.value=state.ref;kpInput.value=Number(state.kp).toFixed(3);kiInput.value=Number(state.ki).toFixed(3);kdInput.value=Number(state.kd).toFixed(3)}lastStab=state.stabilization}
+function drawAll(){drawScene();drawPlot(anglePlot,angleData,'#c43131','angle',false);drawPlot(posPlot,posData,'#2457b8','pos',false);drawPlot(speedPlot,speedData,'#208444','speed',false)}
+function updateTuneTexts(){alphaMinTxt.textContent=Number(state.alpha_beta_min_alpha).toFixed(2);alphaMaxTxt.textContent=Number(state.alpha_beta_max_alpha).toFixed(2);betaMinTxt.textContent=Number(state.alpha_beta_min_beta).toFixed(2);betaMaxTxt.textContent=Number(state.alpha_beta_max_beta).toFixed(2)}
+function updateTexts(){if(state.stabilization&&neutralTimer){clearInterval(neutralTimer);neutralTimer=null}servoTxt.textContent=state.servo_angle;manualAngleTxt.textContent=state.servo_angle;tableTxt.textContent=(state.servo_angle-state.servo_neutral).toFixed(1);xTxt.textContent=state.x>=0?state.x:'--';vTxt.textContent=state.speed_valid?state.v:'--';d1Txt.textContent=state.d1>=0?state.d1:'--';d2Txt.textContent=state.d2>=0?state.d2:'--';stabToggle.textContent=state.stabilization?'||':'▶';manualMinusBtn.disabled=state.stabilization;manualPlusBtn.disabled=state.stabilization;neutralBtn.disabled=state.stabilization;if(performance.now()>tuneLocalUntil)updateTuneTexts();if(!editing){refInput.value=state.ref;kpInput.value=Number(state.kp).toFixed(3);kiInput.value=Number(state.ki).toFixed(3);kdInput.value=Number(state.kd).toFixed(3)}lastStab=state.stabilization}
 function trimContinuousData(t){const minT=Math.max(0,t-PLOT_MAX_S);angleData=angleData.filter(d=>d.t>=minT);posData=posData.filter(d=>d.t>=minT);speedData=speedData.filter(d=>d.t>=minT);lostIntervals=lostIntervals.filter(iv=>(iv.end==null?t:iv.end)>=minT)}
 function updateLostIntervals(t,lost){
   if(!lost)lastBallFoundPlotT=t;
@@ -400,11 +429,46 @@ function updateLostIntervals(t,lost){
   }
   plotWasLost=lost;
 }
-async function fetchState(){try{const r=await fetch('/api/state',{cache:'no-store'});state=await r.json();TABLE_LEN_MM=state.table_length||290;PLOT_MAX_S=state.plot_max_s||30;updateTexts();if(plotRunning){const t=(performance.now()-plotStart)/1000;plotLastT=t;if(t<=PLOT_MAX_S||continuousPlot){const lost=isBallLost();updateLostIntervals(t,lost);angleData.push({t,y:state.servo_angle,lost:false});posData.push({t,y:lost?NaN:state.x,lost});speedData.push({t,y:lost||!state.speed_valid?NaN:state.v,lost});if(continuousPlot)trimContinuousData(t);plotInfo.textContent=`Plot running: ${t.toFixed(1)} s / ${PLOT_MAX_S} s${continuousPlot?' continuous':''}`}else{plotRunning=false;plotToggle.textContent='Go';plotInfo.textContent=`${PLOT_MAX_S} s reached. Plot stopped.`}}drawAll()}catch(e){}}
-function startPlot(){angleData=[];posData=[];speedData=[];lostIntervals=[];lastBallFoundPlotT=0;plotWasLost=false;plotLastT=0;plotStart=performance.now();plotRunning=true;angleFrozen=false;posFrozen=false;speedFrozen=false;plotToggle.textContent='Stop';plotInfo.textContent='Plot running'}
+function keepTuneDraftIfNeeded(nextState){
+  if(tuneDraft&&(tuneApplying||performance.now()<tuneLocalUntil)){
+    nextState.alpha_beta_min_alpha=tuneDraft.alpha_beta_min_alpha;
+    nextState.alpha_beta_max_alpha=tuneDraft.alpha_beta_max_alpha;
+    nextState.alpha_beta_min_beta=tuneDraft.alpha_beta_min_beta;
+    nextState.alpha_beta_max_beta=tuneDraft.alpha_beta_max_beta;
+  }
+  return nextState;
+}
+async function fetchState(){try{const r=await fetch('/api/state',{cache:'no-store'});state=keepTuneDraftIfNeeded(await r.json());TABLE_LEN_MM=state.table_length||290;PLOT_MAX_S=state.plot_max_s||30;updateTexts();if(plotRunning){const t=(performance.now()-plotStart)/1000;plotLastT=t;if(t<=PLOT_MAX_S||continuousPlot){const lost=isBallLost();updateLostIntervals(t,lost);angleData.push({t,y:state.servo_angle,lost:false});posData.push({t,y:lost?NaN:state.x,lost});speedData.push({t,y:lost||!state.speed_valid?NaN:state.v,lost});if(continuousPlot)trimContinuousData(t);plotInfo.textContent=`Plot running: ${t.toFixed(1)} s / ${PLOT_MAX_S} s${continuousPlot?' continuous':''}`}else{plotRunning=false;plotToggle.textContent='Go';plotInfo.textContent=`${PLOT_MAX_S} s reached. Plot stopped.`}}drawAll()}catch(e){}}
+function startPlot(){angleData=[];posData=[];speedData=[];lostIntervals=[];lastBallFoundPlotT=0;plotWasLost=false;plotLastT=0;plotStart=performance.now();plotRunning=true;plotToggle.textContent='Stop';plotInfo.textContent='Plot running'}
 function stopPlot(){plotRunning=false;plotToggle.textContent='Go';plotInfo.textContent='Plot frozen. Press Go to restart from 0.'}
-plotToggle.onclick=()=>plotRunning?stopPlot():startPlot();scenePause.onclick=()=>{sceneFrozen=!sceneFrozen;scenePause.textContent=sceneFrozen?'▶':'||'};anglePause.onclick=()=>{angleFrozen=!angleFrozen;anglePause.textContent=angleFrozen?'▶':'||'};posPause.onclick=()=>{posFrozen=!posFrozen;posPause.textContent=posFrozen?'▶':'||'};speedPause.onclick=()=>{speedFrozen=!speedFrozen;speedPause.textContent=speedFrozen?'▶':'||'};
+function resetPlotData(reason){
+  angleData=[];posData=[];speedData=[];lostIntervals=[];
+  lastBallFoundPlotT=0;plotWasLost=false;plotLastT=0;
+  if(plotRunning)plotStart=performance.now();
+  plotInfo.textContent=reason||'Plot reset.';
+}
+plotToggle.onclick=()=>plotRunning?stopPlot():startPlot();
 continuousPlotBtn.onclick=()=>{continuousPlot=!continuousPlot;continuousPlotBtn.classList.toggle('active',continuousPlot);if(plotRunning){plotInfo.textContent=continuousPlot?'Continuous plot enabled.':'Continuous plot disabled.'}};
+function tuneQuery(){return `ab_min_alpha=${Number(state.alpha_beta_min_alpha).toFixed(4)}&ab_max_alpha=${Number(state.alpha_beta_max_alpha).toFixed(4)}&ab_min_beta=${Number(state.alpha_beta_min_beta).toFixed(4)}&ab_max_beta=${Number(state.alpha_beta_max_beta).toFixed(4)}`}
+function clampTune(){
+  state.alpha_beta_min_alpha=Math.max(0,Math.min(1,Number(state.alpha_beta_min_alpha)));
+  state.alpha_beta_max_alpha=Math.max(0,Math.min(1,Number(state.alpha_beta_max_alpha)));
+  state.alpha_beta_min_beta=Math.max(0,Math.min(2,Number(state.alpha_beta_min_beta)));
+  state.alpha_beta_max_beta=Math.max(0,Math.min(2,Number(state.alpha_beta_max_beta)));
+  if(state.alpha_beta_min_alpha>state.alpha_beta_max_alpha)state.alpha_beta_max_alpha=state.alpha_beta_min_alpha;
+  if(state.alpha_beta_min_beta>state.alpha_beta_max_beta)state.alpha_beta_max_beta=state.alpha_beta_min_beta;
+}
+async function applyTune(save){
+  clampTune();updateTuneTexts();
+  const url=save?'/api/advanced/save?':'/api/advanced/set?';
+  tuneApplying=true;
+  try{const r=await fetch(url+tuneQuery(),{cache:'no-store'});const js=await r.json();if(!js.ok){notify('Valeur alpha/beta refusee.');return}state.alpha_beta_min_alpha=Number(js.alpha_beta_min_alpha);state.alpha_beta_max_alpha=Number(js.alpha_beta_max_alpha);state.alpha_beta_min_beta=Number(js.alpha_beta_min_beta);state.alpha_beta_max_beta=Number(js.alpha_beta_max_beta);tuneDraft=null;tuneLocalUntil=0;updateTuneTexts();if(save)notify('Alpha/beta saved.')}catch(e){notify('Erreur reseau.')}finally{tuneApplying=false}
+}
+function scheduleTune(){if(tuneSaveTimer)clearTimeout(tuneSaveTimer);tuneSaveTimer=setTimeout(()=>applyTune(false),120)}
+function stepTune(key,delta){resetPlotData('Alpha/beta changed. Plot restarted.');tuneLocalUntil=performance.now()+1200;state[key]=Number((Number(state[key])+delta).toFixed(4));clampTune();tuneDraft={alpha_beta_min_alpha:state.alpha_beta_min_alpha,alpha_beta_max_alpha:state.alpha_beta_max_alpha,alpha_beta_min_beta:state.alpha_beta_min_beta,alpha_beta_max_beta:state.alpha_beta_max_beta};updateTuneTexts();scheduleTune();drawAll()}
+function saveTune(){if(tuneSaveTimer)clearTimeout(tuneSaveTimer);applyTune(true)}
+alphaMinMinus.onclick=()=>stepTune('alpha_beta_min_alpha',-0.01);alphaMinPlus.onclick=()=>stepTune('alpha_beta_min_alpha',0.01);alphaMaxMinus.onclick=()=>stepTune('alpha_beta_max_alpha',-0.01);alphaMaxPlus.onclick=()=>stepTune('alpha_beta_max_alpha',0.01);alphaSaveBtn.onclick=saveTune;
+betaMinMinus.onclick=()=>stepTune('alpha_beta_min_beta',-0.01);betaMinPlus.onclick=()=>stepTune('alpha_beta_min_beta',0.01);betaMaxMinus.onclick=()=>stepTune('alpha_beta_max_beta',-0.01);betaMaxPlus.onclick=()=>stepTune('alpha_beta_max_beta',0.01);betaSaveBtn.onclick=saveTune;
 stabToggle.onclick=async()=>{const en=state.stabilization?0:1;await fetch(`/api/control?stabilization=${en}`,{cache:'no-store'});fetchState()};
 async function setManualAngle(angle){angle=Math.max(Number(state.servo_min||0),Math.min(Number(state.servo_max||180),Math.round(angle)));manualAngleTxt.textContent=angle;servoTxt.textContent=angle;tableTxt.textContent=(angle-Number(state.servo_neutral||90)).toFixed(1);await fetch(`/api/control?angle=${angle}`,{cache:'no-store'});fetchState()}
 manualMinusBtn.onclick=()=>{if(!state.stabilization)setManualAngle(Number(state.servo_angle||state.servo_neutral||90)-Number(state.manual_angle_step||5))};
@@ -661,7 +725,7 @@ const cx=w*.5,cy=h*.56,len=w*.72,tableDeg=displayAngle(),a=(-tableDeg)*Math.PI/1
 const x1=cx-ux*len/2,y1=cy-uy*len/2,x2=cx+ux*len/2,y2=cy+uy*len/2;
 c.beginPath();c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke();
 c.beginPath();c.moveTo(cx,cy+8);c.lineTo(cx-w*.035,cy+h*.22);c.lineTo(cx+w*.035,cy+h*.22);c.closePath();c.stroke();
-c.font=`${Math.max(14,w*.018)}px Arial`;c.fillText(`servo=${st.current_angle} deg / table=${tableDeg.toFixed(1)} deg`,18,h-22);
+c.font=`${Math.max(14,w*.018)}px Arial`;c.fillText(`servo=${st.current_angle} deg`,18,h-76);c.fillText(`table=${tableDeg.toFixed(1)} deg`,18,h-24);
 }
 function syncInputs(){minInput.value=st.theoretical_min_angle;maxInput.value=st.theoretical_max_angle;limitMinInput.value=st.limit_min_angle;limitMaxInput.value=st.limit_max_angle;neutralTxt.textContent=neutralFromInputs();offsetTxt.textContent=st.neutral_offset_us;pwmTxt.textContent=st.current_pwm_us;servoTxt.textContent=st.current_angle;draw()}
 async function start(){if(started)return;started=true;const mode=params.get('initial')==='1'?'initial':'manual';await fetch('/api/servo_calibration/action?cmd=start&mode='+mode,{cache:'no-store'})}
@@ -743,6 +807,9 @@ input{height:42px;border:3px solid #202020;background:white;font-size:20px;paddi
 <button id="doneBtn">Done</button>
 <button id="submitBtn">Valider distance</button>
 <button id="acceptBtn">Valider calibration</button>
+<button id="verifyTof1Btn">Calibrate TOF 1</button>
+<button id="verifyTof2Btn">Calibrate TOF 2</button>
+<button id="goNoiseBtn">Go to noise rejection</button>
 <button id="restartBtn">Restart</button>
 <button id="cancelBtn">Cancel</button>
 </div>
@@ -758,7 +825,7 @@ const nrMinAlpha=document.getElementById('nrMinAlpha'),nrMaxAlpha=document.getEl
 const verifyPrevBtn=document.getElementById('verifyPrevBtn'),verifyNextBtn=document.getElementById('verifyNextBtn');
 const title=document.getElementById('title'),instruction=document.getElementById('instruction'),statusEl=document.getElementById('status');
 const realRow=document.getElementById('realRow'),realInput=document.getElementById('realInput');
-const doneBtn=document.getElementById('doneBtn'),submitBtn=document.getElementById('submitBtn'),acceptBtn=document.getElementById('acceptBtn'),restartBtn=document.getElementById('restartBtn'),cancelBtn=document.getElementById('cancelBtn');
+const doneBtn=document.getElementById('doneBtn'),submitBtn=document.getElementById('submitBtn'),acceptBtn=document.getElementById('acceptBtn'),verifyTof1Btn=document.getElementById('verifyTof1Btn'),verifyTof2Btn=document.getElementById('verifyTof2Btn'),goNoiseBtn=document.getElementById('goNoiseBtn'),restartBtn=document.getElementById('restartBtn'),cancelBtn=document.getElementById('cancelBtn');
 const toast=document.getElementById('toast');let toastTimer=null;
 let s={};
 const params=new URLSearchParams(location.search);
@@ -883,9 +950,25 @@ function drawScene(){
 fit(scene);const c=scene.getContext('2d'),w=scene.width,h=scene.height;c.clearRect(0,0,w,h);c.lineWidth=4;c.strokeStyle='#171717';c.fillStyle='#171717';
 const cx=w*.5,cy=h*.56,len=w*.72,a=0,ux=Math.cos(a),uy=Math.sin(a),nx=0,ny=-1;const x1=cx-len/2,y1=cy,x2=cx+len/2,y2=cy;
 c.beginPath();c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke();c.beginPath();c.moveTo(cx,cy+8);c.lineTo(cx-w*.035,cy+h*.22);c.lineTo(cx+w*.035,cy+h*.22);c.closePath();c.stroke();
-const ballLost=verifyBallLost();
-let pos=verifyVisualPosition(); if(ballLost||!Number.isFinite(pos)||pos<0)pos=TABLE_LEN_MM/2; pos=Math.max(0,Math.min(TABLE_LEN_MM,pos)); const p=pos/TABLE_LEN_MM;
+const stepName=String(s.step||''),noiseCaptureStep=stepName.startsWith('noise')&&stepName!=='noise_done';
+const targetPos=Number(s.visual_target_mm??s.visual_pos_mm);
+const livePos=Number(s.live_pos_mm);
+const ballLost=noiseCaptureStep?(!Number.isFinite(livePos)||livePos<0):verifyBallLost();
+let pos=noiseCaptureStep?livePos:verifyVisualPosition(); if(ballLost||!Number.isFinite(pos)||pos<0)pos=Number.isFinite(targetPos)?targetPos:TABLE_LEN_MM/2; pos=Math.max(0,Math.min(TABLE_LEN_MM,pos)); const p=pos/TABLE_LEN_MM;
 const r=Math.max(15,Math.min(w,h)*.045),contactX=x1+(x2-x1)*p,contactY=y1+(y2-y1)*p,bx=contactX+nx*r,by=contactY+ny*r;
+if(noiseCaptureStep&&Number.isFinite(targetPos)&&targetPos>=0){
+  const tp=Math.max(0,Math.min(TABLE_LEN_MM,targetPos))/TABLE_LEN_MM;
+  const tx=x1+(x2-x1)*tp,ty=cy-r;
+  c.save();
+  c.setLineDash([8,6]);
+  c.strokeStyle='#777';
+  c.lineWidth=4;
+  c.beginPath();c.arc(tx,ty,r,0,Math.PI*2);c.stroke();
+  c.fillStyle='#777';
+  c.font=`900 ${Math.max(12,w*.016)}px Arial`;
+  c.fillText('target',tx-24,ty-r-10);
+  c.restore();
+}
 if(ballLost){
   c.save();
   c.setLineDash([10,7]);
@@ -894,7 +977,11 @@ if(ballLost){
   c.beginPath();c.arc(bx,by,r,0,Math.PI*2);c.stroke();
   c.restore();
 }else{
+  if(noiseCaptureStep&&s.noise_capture_ready===false){
+    c.strokeStyle='#c43131';
+  }
   c.beginPath();c.arc(bx,by,r,0,Math.PI*2);c.stroke();c.beginPath();c.moveTo(bx-r*.65,by-r*.65);c.lineTo(bx+r*.65,by+r*.65);c.moveTo(bx+r*.65,by-r*.65);c.lineTo(bx-r*.65,by+r*.65);c.stroke();
+  c.strokeStyle='#171717';
 }
 if(s.step==='verify'||String(s.step||'').startsWith('noise')){[0,72,145,218,290].forEach(mm=>{const x=x1+(x2-x1)*(mm/TABLE_LEN_MM);c.strokeStyle='#208444';c.fillStyle='#208444';c.lineWidth=3;c.beginPath();c.moveTo(x,cy+30);c.lineTo(x,cy+70);c.stroke();c.beginPath();c.moveTo(x,cy+24);c.lineTo(x-8,cy+42);c.lineTo(x+8,cy+42);c.closePath();c.fill();c.fillText(`${mm}`,x-10,cy+90)});c.strokeStyle='#171717';c.fillStyle='#171717'}
 const focusTof=s.step==='verify'?selectedVerifyTof():s.tof;
@@ -916,9 +1003,14 @@ if((s.step!=='verify'&&!String(s.step||'').startsWith('noise')&&s.tof)||(s.step=
   }
   c.strokeStyle='#171717';c.fillStyle='#171717';
 }
-c.font=`${Math.max(14,w*.018)}px Arial`;c.fillText(`visual pos=${Math.round(pos)} mm`,18,h-42);
+c.font=`${Math.max(14,w*.018)}px Arial`;c.fillText(`visual pos=${Math.round(pos)} mm`,18,h-76);
 if(s.step==='verify'){c.fillText(verifyLabel(),18,h-20)}
-if(ballLost)drawCalibrationBadge(c,w,h,'Ball lost','#c43131');
+if(noiseCaptureStep){
+  c.fillText(`target=${Math.round(targetPos)} mm`,18,h-24);
+  if(ballLost)drawCalibrationBadge(c,w,h,'Ball lost','#c43131');
+  else if(s.noise_capture_ready===false)drawCalibrationBadge(c,w,h,'Move to target','#c43131');
+  else drawCalibrationBadge(c,w,h,'Ready','#208444');
+}else if(ballLost)drawCalibrationBadge(c,w,h,'Ball lost','#c43131');
 }
 function setButtons(){
 const verifyOnly=params.get('verify')==='1';
@@ -934,13 +1026,22 @@ verifyPrevBtn.classList.toggle('show',verifyStep);
 verifyNextBtn.classList.toggle('show',verifyStep);
 statusEl.classList.toggle('hidden',verifyStep);
 acceptBtn.classList.toggle('hidden',s.step!=='verify'&&s.step!=='noise_done');
+verifyTof1Btn.classList.add('hidden');
+verifyTof2Btn.classList.add('hidden');
+goNoiseBtn.classList.add('hidden');
+if(verifyStep){
+  const justCalibrated=Number(s.default_verify_tof||0);
+  verifyTof1Btn.classList.toggle('hidden',justCalibrated===1);
+  verifyTof2Btn.classList.toggle('hidden',justCalibrated===2);
+  goNoiseBtn.classList.remove('hidden');
+}
 restartBtn.classList.toggle('hidden',false);
 cancelBtn.classList.toggle('hidden',params.get('initial')==='1');
-if(verifyOnly||params.get('noise_result')==='1'){
+if((verifyOnly&&verifyStep)||params.get('noise_result')==='1'){
   doneBtn.classList.remove('hidden');
   submitBtn.classList.add('hidden');
   acceptBtn.classList.add('hidden');
-  restartBtn.classList.add('hidden');
+  restartBtn.classList.toggle('hidden',!verifyStep);
   cancelBtn.classList.add('hidden');
   realRow.classList.add('hidden');
   doneBtn.textContent='Done';
@@ -970,7 +1071,11 @@ instruction.textContent=s.instruction||'';
 rawTxt.textContent=s.raw_valid?`raw=${s.raw_mm} mm`:'raw invalid';
 tofTxt.textContent=s.tof?`TOF ${s.tof}`:'';
 dot.className='dot '+(s.raw_valid?'ok':'bad');
-if(s.error)statusEl.innerHTML=`<span class="err">${s.error}</span>`;else statusEl.textContent=s.status||'';
+const noiseCaptureStep=String(s.step||'').startsWith('noise')&&s.step!=='noise_done';
+if(s.error)statusEl.innerHTML=`<span class="err">${s.error}</span>`;
+else if(noiseCaptureStep&&s.noise_capture_ready===false)statusEl.innerHTML=`<span class="err">Placez la balle a +/- ${s.noise_capture_tolerance_mm||15} mm de la cible avant la capture.</span>`;
+else if(noiseCaptureStep)statusEl.innerHTML='<span style="color:#208444">Balle dans la zone de capture.</span>';
+else statusEl.textContent=s.status||'';
 if(s.error&&s.error!==lastError)notify(s.error);
 lastError=s.error||'';
 setButtons();drawScene();
@@ -987,12 +1092,15 @@ else if(params.get('target')==='1')await fetch('/api/calibration/action?cmd=star
 else if(params.get('target')==='2')await fetch('/api/calibration/action?cmd=start&target=2',{cache:'no-store'});
 }
 async function getState(){try{await ensureStarted();const r=await fetch('/api/calibration/state',{cache:'no-store'});s=await r.json();update()}catch(e){statusEl.textContent='Erreur reseau'}}
-async function action(q){doneBtn.disabled=submitBtn.disabled=acceptBtn.disabled=restartBtn.disabled=cancelBtn.disabled=true;try{const r=await fetch('/api/calibration/action?'+q,{cache:'no-store'});s=await r.json();update();if(s.done)setTimeout(()=>{location.href='/'},600)}catch(e){statusEl.textContent='Erreur action';notify('Erreur reseau.')}doneBtn.disabled=submitBtn.disabled=acceptBtn.disabled=restartBtn.disabled=cancelBtn.disabled=false}
+async function action(q){doneBtn.disabled=submitBtn.disabled=acceptBtn.disabled=verifyTof1Btn.disabled=verifyTof2Btn.disabled=goNoiseBtn.disabled=restartBtn.disabled=cancelBtn.disabled=true;try{const r=await fetch('/api/calibration/action?'+q,{cache:'no-store'});s=await r.json();update();if(s.done)setTimeout(()=>{location.href='/'},600)}catch(e){statusEl.textContent='Erreur action';notify('Erreur reseau.')}doneBtn.disabled=submitBtn.disabled=acceptBtn.disabled=verifyTof1Btn.disabled=verifyTof2Btn.disabled=goNoiseBtn.disabled=restartBtn.disabled=cancelBtn.disabled=false}
 realInput.onfocus=()=>{realInputEditing=true};
 realInput.onblur=()=>{realInputEditing=false};
-doneBtn.onclick=()=>{if(params.get('verify')==='1'||params.get('noise_result')==='1')location.href='/calibration_select';else action('cmd=done')};
+doneBtn.onclick=()=>{if((params.get('verify')==='1'&&s.step==='verify')||params.get('noise_result')==='1')location.href='/calibration_select';else action('cmd=done')};
 submitBtn.onclick=()=>action('cmd=real_fov&value='+encodeURIComponent(realInput.value||'145'));
 acceptBtn.onclick=()=>action('cmd=accept');
+verifyTof1Btn.onclick=()=>action('cmd=calibrate_tof&target=1');
+verifyTof2Btn.onclick=()=>action('cmd=calibrate_tof&target=2');
+goNoiseBtn.onclick=()=>action('cmd=go_noise');
 restartBtn.onclick=()=>action('cmd=restart');
 cancelBtn.onclick=()=>action('cmd=cancel');
 verifyPrevBtn.onclick=()=>cycleVerifyView(-1);
@@ -1659,6 +1767,11 @@ static void send_state(void) {
   float ki;
   float kd;
   get_controller_gains(&kp, &ki, &kd);
+  float ab_min_alpha = 0.0f;
+  float ab_max_alpha = 0.0f;
+  float ab_min_beta = 0.0f;
+  float ab_max_beta = 0.0f;
+  get_alpha_beta_parameters(&ab_min_alpha, &ab_max_alpha, &ab_min_beta, &ab_max_beta);
 
   String json = "{";
   json += "\"d1\":" + String(get_d1()) + ",";
@@ -1682,6 +1795,10 @@ static void send_state(void) {
   json += "\"servo_neutral\":" + String(get_servo_neutral_angle_deg()) + ",";
   json += "\"servo_theoretical_min\":" + String(get_servo_theoretical_min_angle_deg()) + ",";
   json += "\"servo_theoretical_max\":" + String(get_servo_theoretical_max_angle_deg()) + ",";
+  json += "\"alpha_beta_min_alpha\":" + String(ab_min_alpha, 4) + ",";
+  json += "\"alpha_beta_max_alpha\":" + String(ab_max_alpha, 4) + ",";
+  json += "\"alpha_beta_min_beta\":" + String(ab_min_beta, 4) + ",";
+  json += "\"alpha_beta_max_beta\":" + String(ab_max_beta, 4) + ",";
   json += "\"manual_angle_step\":" + String(manual_angle_step_deg);
   json += "}";
 
@@ -2167,7 +2284,7 @@ static void handle_servo_calibration_action(void) {
 
 static void send_calibration_state(void) {
   update_tof_distances();
-  compute_ball_position();
+  bool position_valid = compute_ball_position();
   float ab_min_alpha = 0.0f;
   float ab_max_alpha = 0.0f;
   float ab_min_beta = 0.0f;
@@ -2188,6 +2305,11 @@ static void send_calibration_state(void) {
   int tof1_visual_pos = get_ball_position_from_tof(TOF1);
   int tof2_visual_pos = get_ball_position_from_tof(TOF2);
   int default_verify_tof = (calibration_step == CAL_VERIFY) ? manual_calibration_target() : 0;
+  int live_position_mm = position_valid ? get_ball_position() : -1;
+  bool noise_capture_ready = (noise_index >= 0) &&
+                             live_position_mm >= 0 &&
+                             abs(live_position_mm - calibration_noise.position_mm[noise_index]) <=
+                                 NOISE_CAPTURE_TARGET_TOLERANCE_MM;
 
   const char *step_name = "unknown";
   const char *title = "Calibration";
@@ -2305,6 +2427,9 @@ static void send_calibration_state(void) {
   json += "\"speed_mm_s\":" + String(get_ball_speed()) + ",";
   json += "\"speed_valid\":" + String(is_ball_speed_valid() ? "true" : "false") + ",";
   json += "\"visual_target_mm\":" + String(visual_target) + ",";
+  json += "\"live_pos_mm\":" + String(live_position_mm) + ",";
+  json += "\"noise_capture_tolerance_mm\":" + String(NOISE_CAPTURE_TARGET_TOLERANCE_MM) + ",";
+  json += "\"noise_capture_ready\":" + String(noise_capture_ready ? "true" : "false") + ",";
   json += "\"alpha_beta_min_alpha\":" + String(ab_min_alpha, 4) + ",";
   json += "\"alpha_beta_max_alpha\":" + String(ab_max_alpha, 4) + ",";
   json += "\"alpha_beta_min_beta\":" + String(ab_min_beta, 4) + ",";
@@ -2359,10 +2484,36 @@ static void handle_calibration_action(void) {
     return;
   }
 
+  if (cmd == "calibrate_tof" && calibration_step == CAL_VERIFY) {
+    int target = server.arg("target").toInt();
+
+    if (target != TOF1 && target != TOF2) {
+      calibration_error_msg = "TOF a calibrer invalide.";
+      send_calibration_state();
+      return;
+    }
+
+    save_draft_to_preferences();
+    distance_sensors_calibrated = true;
+    start_manual_calibration(target);
+    send_calibration_state();
+    return;
+  }
+
+  if (cmd == "go_noise" && calibration_step == CAL_VERIFY) {
+    save_draft_to_preferences();
+    distance_sensors_calibrated = true;
+    start_noise_calibration(false);
+    send_calibration_state();
+    return;
+  }
+
   if (cmd == "restart") {
     int manual_target = manual_calibration_target();
 
-    if (calibration_mode == CAL_MODE_NOISE_ONLY) {
+    if (calibration_mode == CAL_MODE_VERIFY_ONLY) {
+      start_verify_calibration();
+    } else if (calibration_mode == CAL_MODE_NOISE_ONLY) {
       start_noise_calibration(true);
     } else if (noise_step_index(calibration_step) >= 0 || calibration_step == CAL_NOISE_DONE) {
       start_noise_calibration(false);
@@ -2432,6 +2583,16 @@ static void handle_calibration_action(void) {
       int speed_noise_mm_s = DEFAULT_SPEED_NOISE_DEADBAND_MM_S;
       int tof1_position_noise_mm = DEFAULT_POSITION_NOISE_DEADBAND_MM;
       int tof2_position_noise_mm = DEFAULT_POSITION_NOISE_DEADBAND_MM;
+
+      update_tof_distances();
+      bool position_valid = compute_ball_position();
+      int current_position_mm = position_valid ? get_ball_position() : -1;
+      if (current_position_mm < 0 ||
+          abs(current_position_mm - target_position_mm) > NOISE_CAPTURE_TARGET_TOLERANCE_MM) {
+        calibration_error_msg = "Balle hors de la zone de capture. Placez-la pres de la cible avant de mesurer le bruit.";
+        send_calibration_state();
+        return;
+      }
 
       if (!capture_noise_estimate(target_position_mm,
                                   &position_noise_mm,
