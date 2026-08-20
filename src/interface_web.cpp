@@ -154,6 +154,7 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 .topBtn{left:10px}.gearBtn{right:10px}
 .settingsMenu{position:absolute;top:62px;right:10px;display:none;min-width:190px;background:#fffdf6;border:3px solid var(--line);padding:8px;z-index:5}
 .settingsMenu.open{display:grid;gap:8px}.menuBtn{border:3px solid var(--line);background:#f8f5ea;font-weight:800;font-size:16px;padding:9px 10px;text-align:left}
+.morePanel{display:none;border:3px solid var(--line);background:white;padding:10px;font-size:13px;line-height:1.35;max-width:310px}.morePanel.open{display:grid;gap:8px}.moreTitle{font-size:17px;font-weight:900;text-decoration:underline}.moreItem b{display:block;font-size:12px;text-transform:uppercase;color:var(--muted);margin-bottom:2px}.moreMsg{border-top:2px solid var(--line);padding-top:8px;font-weight:700}
 .sectionTitle{text-align:center;font-size:25px;font-weight:800;margin:0 0 8px}
 .dataVizHeader{display:grid;gap:8px;justify-items:center;margin:0 0 8px}.plotActions{display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap}
 .plotModeBtn{border:3px solid var(--line);background:#f8f5ea;font-weight:900;font-size:16px;padding:8px 12px;vertical-align:middle}
@@ -183,6 +184,14 @@ button{cursor:pointer}button:disabled,input:disabled{opacity:.5;cursor:not-allow
       <button class="menuBtn" id="calibrateBtn">Calibrate TOFs</button>
       <button class="menuBtn" id="calibrateServoBtn">Calibrate servo</button>
       <button class="menuBtn" id="advancedBtn">Advanced parameters</button>
+      <button class="menuBtn" id="moreBtn">More</button>
+      <div class="morePanel" id="morePanel">
+        <div class="moreTitle">More</div>
+        <div class="moreItem"><b>Auteur</b>Jérôme ESSOLA ELANGA<br>Étudiant en master de robotique à l'EPFL<br>2026 - 2027</div>
+        <div class="moreItem"><b>Release version</b>Robovaly 2026 - 20.08.2026</div>
+        <div class="moreItem"><b>Github</b>Jess_lnga</div>
+        <div class="moreMsg">Merci d'avoir participé au workshop Balancier PID! Ce projet aurait encore besoin d'améliorations. Si vous avez des retours ou des suggestions, n'hésitez pas à passer sur le github!</div>
+      </div>
     </div>
     <canvas id="scene"></canvas>
   </div>
@@ -240,7 +249,7 @@ let TABLE_LEN_MM=290, PLOT_MAX_S=30; const REFRESH_MS=55;
 const scene=document.getElementById('scene'), anglePlot=document.getElementById('anglePlot'), posPlot=document.getElementById('posPlot'), speedPlot=document.getElementById('speedPlot');
 const plotToggle=document.getElementById('plotToggle'), continuousPlotBtn=document.getElementById('continuousPlotBtn'), plotInfo=document.getElementById('plotInfo');
 const toast=document.getElementById('toast');
-const settingsBtn=document.getElementById('settingsBtn'), settingsMenu=document.getElementById('settingsMenu'), calibrateBtn=document.getElementById('calibrateBtn'), calibrateServoBtn=document.getElementById('calibrateServoBtn'), advancedBtn=document.getElementById('advancedBtn');
+const settingsBtn=document.getElementById('settingsBtn'), settingsMenu=document.getElementById('settingsMenu'), calibrateBtn=document.getElementById('calibrateBtn'), calibrateServoBtn=document.getElementById('calibrateServoBtn'), advancedBtn=document.getElementById('advancedBtn'), moreBtn=document.getElementById('moreBtn'), morePanel=document.getElementById('morePanel');
 const stabToggle=document.getElementById('stabToggle'), manualMinusBtn=document.getElementById('manualMinusBtn'), manualPlusBtn=document.getElementById('manualPlusBtn'), manualAngleTxt=document.getElementById('manualAngleTxt');
 const refInput=document.getElementById('refInput'), kpInput=document.getElementById('kpInput'), kiInput=document.getElementById('kiInput'), kdInput=document.getElementById('kdInput');
 const saveValuesBtn=document.getElementById('saveValuesBtn'), resetValuesBtn=document.getElementById('resetValuesBtn'), neutralBtn=document.getElementById('neutralBtn'), saveStatus=document.getElementById('saveStatus');
@@ -478,6 +487,7 @@ settingsBtn.onclick=()=>settingsMenu.classList.toggle('open');
 calibrateBtn.onclick=()=>{location.href='/calibration_select'};
 calibrateServoBtn.onclick=()=>{location.href='/servo_calibration'};
 advancedBtn.onclick=()=>{location.href='/advanced'};
+moreBtn.onclick=()=>morePanel.classList.toggle('open');
 saveValuesBtn.onclick=async()=>{
   const q=`ref=${refInput.value}&kp=${kpInput.value}&ki=${kiInput.value}&kd=${kdInput.value}`;
   saveValuesBtn.disabled=true;saveStatus.textContent='Saving...';
