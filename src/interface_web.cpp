@@ -7,11 +7,14 @@
 
 #include "ball_position.h"
 #include "controller.h"
+#include "interface_usb.h"
 #include "servo_cmd.h"
 #include "tof.h"
 
-static const char *AP_SSID = "Kit_Robovaly";
+static const char *AP_SSID_DEFAULT = "Kit_Robovaly";
 static const char *AP_PASS = "robovaly123";
+static const char *WIFI_NAMESPACE = "wifi";
+static const char *WIFI_SSID_KEY = "ssid";
 
 static const BaseType_t WEB_TASK_CORE = 0;
 static const uint32_t WEB_TASK_DELAY_MS = 1;
@@ -39,6 +42,7 @@ static const int NOISE_CAPTURE_TARGET_TOLERANCE_MM = 15;
 static WebServer server(80);
 static TaskHandle_t web_task_handle = nullptr;
 static bool distance_sensors_calibrated = false;
+static char wifi_ap_ssid[33] = "Kit_Robovaly";
 
 enum CalibrationStep {
   CAL_TOF1_FIND_FOV,
@@ -2127,6 +2131,13 @@ static void update_web_client_control_mode(void) {
     return;
   }
 
+  if (usb_interface_has_priority()) {
+    web_client_present = false;
+    auto_stabilization_without_client = false;
+    neutral_return_pending = false;
+    return;
+  }
+
   uint32_t now = millis();
   bool has_client = WiFi.softAPgetStationNum() > 0;
 
@@ -2672,6 +2683,8 @@ static void handle_calibration_action(void) {
   send_calibration_state();
 }
 
+static bool reject_if_usb_blocks_web(void);
+
 static void setup_routes(void) {
   server.on("/", HTTP_GET, []() {
     if (distance_sensors_calibrated) {
@@ -2710,22 +2723,27 @@ static void setup_routes(void) {
   });
 
   server.on("/api/calibrate", HTTP_GET, []() {
+    if (reject_if_usb_blocks_web()) return;
     handle_calibration_action();
   });
 
   server.on("/api/calibration/state", HTTP_GET, []() {
+    if (reject_if_usb_blocks_web()) return;
     send_calibration_state();
   });
 
   server.on("/api/calibration/action", HTTP_GET, []() {
+    if (reject_if_usb_blocks_web()) return;
     handle_calibration_action();
   });
 
   server.on("/api/servo_calibration/state", HTTP_GET, []() {
+    if (reject_if_usb_blocks_web()) return;
     send_servo_calibration_state();
   });
 
   server.on("/api/servo_calibration/action", HTTP_GET, []() {
+    if (reject_if_usb_blocks_web()) return;
     if (!distance_sensors_calibrated &&
         !servo_calibration_initial_in_progress &&
         !(server.arg("mode") == "initial" && server.arg("cmd") == "start")) {
@@ -2741,6 +2759,7 @@ static void setup_routes(void) {
       server.send(423, "application/json; charset=utf-8", "{\"calibrated\":false}");
       return;
     }
+    if (reject_if_usb_blocks_web()) return;
     send_state();
   });
 
@@ -2749,6 +2768,7 @@ static void setup_routes(void) {
       server.send(423, "application/json; charset=utf-8", "{\"calibrated\":false}");
       return;
     }
+    if (reject_if_usb_blocks_web()) return;
     send_advanced_state();
   });
 
@@ -2757,6 +2777,7 @@ static void setup_routes(void) {
       server.send(423, "application/json; charset=utf-8", "{\"calibrated\":false}");
       return;
     }
+    if (reject_if_usb_blocks_web()) return;
 
     bool ok = update_advanced_params_from_request();
     send_advanced_state(ok);
@@ -2767,6 +2788,7 @@ static void setup_routes(void) {
       server.send(423, "application/json; charset=utf-8", "{\"calibrated\":false}");
       return;
     }
+    if (reject_if_usb_blocks_web()) return;
 
     reset_all_advanced_parameters();
     send_advanced_state();
@@ -2777,6 +2799,7 @@ static void setup_routes(void) {
       server.send(423, "application/json; charset=utf-8", "{\"calibrated\":false}");
       return;
     }
+    if (reject_if_usb_blocks_web()) return;
 
     bool ok = update_advanced_params_from_request();
     if (ok) {
@@ -2790,6 +2813,7 @@ static void setup_routes(void) {
       server.send(423, "application/json; charset=utf-8", "{\"calibrated\":false}");
       return;
     }
+    if (reject_if_usb_blocks_web()) return;
 
     if (server.hasArg("stabilization")) {
       neutral_return_pending = false;
@@ -2809,6 +2833,7 @@ static void setup_routes(void) {
       server.send(423, "application/json; charset=utf-8", "{\"calibrated\":false}");
       return;
     }
+    if (reject_if_usb_blocks_web()) return;
 
     update_controller_params_from_request();
 
@@ -2820,6 +2845,7 @@ static void setup_routes(void) {
       server.send(423, "application/json; charset=utf-8", "{\"calibrated\":false}");
       return;
     }
+    if (reject_if_usb_blocks_web()) return;
 
     update_controller_params_from_request();
     save_controller_settings();
@@ -2831,6 +2857,7 @@ static void setup_routes(void) {
       server.send(423, "application/json; charset=utf-8", "{\"calibrated\":false}");
       return;
     }
+    if (reject_if_usb_blocks_web()) return;
 
     load_controller_settings();
     send_state();
@@ -2841,9 +2868,34 @@ static void setup_routes(void) {
   });
 }
 
+static bool usb_blocks_web_control(void) {
+  return usb_interface_has_priority();
+}
+
+static bool reject_if_usb_blocks_web(void) {
+  if (!usb_blocks_web_control()) {
+    return false;
+  }
+
+  server.send(423, "application/json; charset=utf-8", "{\"ok\":false,\"busy\":\"usb\"}");
+  return true;
+}
+
+static void load_wifi_settings(void) {
+  Preferences prefs;
+  prefs.begin(WIFI_NAMESPACE, true);
+  String saved_ssid = prefs.getString(WIFI_SSID_KEY, AP_SSID_DEFAULT);
+  prefs.end();
+  if (saved_ssid.length() < 1 || saved_ssid.length() > 32) {
+    saved_ssid = AP_SSID_DEFAULT;
+  }
+  strlcpy(wifi_ap_ssid, saved_ssid.c_str(), sizeof(wifi_ap_ssid));
+}
+
 static void web_task(void *pv) {
   (void)pv;
 
+  load_wifi_settings();
   load_advanced_settings();
   load_controller_settings();
   distance_sensors_calibrated = load_calibration_done();
@@ -2855,10 +2907,10 @@ static void web_task(void *pv) {
   }
 
   WiFi.mode(WIFI_AP);
-  bool ap_ok = WiFi.softAP(AP_SSID, AP_PASS);
+  bool ap_ok = WiFi.softAP(wifi_ap_ssid, AP_PASS);
   delay(200);
 
-  Serial.printf("\nWeb AP %s: %s\n", AP_SSID, ap_ok ? "OK" : "FAIL");
+  Serial.printf("\nWeb AP %s: %s\n", wifi_ap_ssid, ap_ok ? "OK" : "FAIL");
   Serial.print("Web IP: ");
   Serial.println(WiFi.softAPIP());
 
@@ -2901,4 +2953,67 @@ bool load_startup_persistent_settings(void) {
   load_advanced_settings();
   load_controller_settings();
   return calibration_loaded;
+}
+
+bool wifi_interface_client_connected(void) {
+  return WiFi.softAPgetStationNum() > 0;
+}
+
+bool wifi_interface_has_priority(void) {
+  return wifi_interface_client_connected() && !usb_interface_has_priority();
+}
+
+bool set_wifi_ap_ssid(const char *ssid) {
+  if (ssid == nullptr) {
+    return false;
+  }
+
+  size_t len = strlen(ssid);
+  if (len < 1 || len > 32) {
+    return false;
+  }
+
+  for (size_t i = 0; i < len; i++) {
+    unsigned char ch = (unsigned char)ssid[i];
+    if (ch < 32 || ch == '"' || ch == '\\') {
+      return false;
+    }
+  }
+
+  strlcpy(wifi_ap_ssid, ssid, sizeof(wifi_ap_ssid));
+
+  Preferences prefs;
+  prefs.begin(WIFI_NAMESPACE, false);
+  prefs.putString(WIFI_SSID_KEY, wifi_ap_ssid);
+  prefs.end();
+
+  wifi_mode_t mode = WiFi.getMode();
+  if ((mode & WIFI_AP) != 0) {
+    WiFi.softAPdisconnect(true);
+    delay(100);
+    WiFi.softAP(wifi_ap_ssid, AP_PASS);
+  }
+
+  return true;
+}
+
+const char *get_wifi_ap_ssid(void) {
+  return wifi_ap_ssid;
+}
+
+bool save_persistent_controller_settings(void) {
+  return save_controller_settings();
+}
+
+bool load_persistent_controller_settings(void) {
+  load_controller_settings();
+  return true;
+}
+
+bool save_persistent_advanced_settings(void) {
+  return save_advanced_settings();
+}
+
+bool load_persistent_advanced_settings(void) {
+  return load_advanced_settings();
 }

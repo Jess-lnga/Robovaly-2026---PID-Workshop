@@ -9,6 +9,7 @@ github: jess-lnga
 #include "tof.h"
 #include "controller.h"
 #include "interface_web.h"
+#include "interface_usb.h"
 
 static const uint32_t SERIAL_BAUDRATE = 115200;
 static const BaseType_t CONTROLLER_TASK_CORE = 1;
@@ -33,6 +34,7 @@ void setup() {
   init_tof(false);
   load_startup_persistent_settings();
   init_controller();
+  launch_interface_usb();
   launch_interface_web();
 
   xTaskCreatePinnedToCore(
