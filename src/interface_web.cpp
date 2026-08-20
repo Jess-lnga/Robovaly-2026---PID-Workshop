@@ -2170,7 +2170,7 @@ static void update_web_client_control_mode(void) {
   }
 }
 
-static void send_servo_calibration_state(bool ok = true) {
+static String build_servo_calibration_state_json(bool ok = true) {
   String json = "{";
   json += "\"ok\":" + String(ok ? "true" : "false") + ",";
   json += "\"theoretical_min_angle\":" + String(calibration_servo.theoretical_min_angle) + ",";
@@ -2184,8 +2184,11 @@ static void send_servo_calibration_state(bool ok = true) {
   json += "\"pwm_step_us\":" + String(calibration_servo.pwm_step_us) + ",";
   json += "\"error\":\"" + calibration_error_msg + "\"";
   json += "}";
+  return json;
+}
 
-  server.send(200, "application/json; charset=utf-8", json);
+static void send_servo_calibration_state(bool ok = true) {
+  server.send(200, "application/json; charset=utf-8", build_servo_calibration_state_json(ok));
 }
 
 static void start_servo_calibration(bool initial_mode) {
@@ -2303,7 +2306,7 @@ static void handle_servo_calibration_action(void) {
   send_servo_calibration_state(false);
 }
 
-static void send_calibration_state(void) {
+static String build_calibration_state_json(void) {
   update_tof_distances();
   bool position_valid = compute_ball_position();
   float ab_min_alpha = 0.0f;
@@ -2468,8 +2471,11 @@ static void send_calibration_state(void) {
   json += "\"error\":\"" + calibration_error_msg + "\",";
   json += "\"done\":" + String(calibration_flow_done ? "true" : "false");
   json += "}";
+  return json;
+}
 
-  server.send(200, "application/json; charset=utf-8", json);
+static void send_calibration_state(void) {
+  server.send(200, "application/json; charset=utf-8", build_calibration_state_json());
 }
 
 static void handle_calibration_action(void) {
@@ -2681,6 +2687,300 @@ static void handle_calibration_action(void) {
 
   calibration_error_msg = "Commande de calibration inconnue.";
   send_calibration_state();
+}
+
+static String calibration_json_for_usb(void) {
+  String json = build_calibration_state_json();
+  if (json.length() > 1 && json[0] == '{') {
+    json = "{\"calibration\":true," + json.substring(1);
+  }
+  return json;
+}
+
+String usb_calibration_state_json(void) {
+  return calibration_json_for_usb();
+}
+
+String usb_calibration_start_json(const char *mode, int target) {
+  calibration_error_msg = "";
+  String mode_str = mode ? String(mode) : String();
+
+  if (mode_str == "initial") {
+    start_initial_calibration();
+  } else if (mode_str == "initial_tofs") {
+    start_initial_tof_calibration();
+  } else if (mode_str == "verify") {
+    start_verify_calibration();
+  } else if (mode_str == "noise") {
+    start_noise_calibration(true);
+  } else if (mode_str == "noise_result") {
+    start_noise_result_view();
+  } else if (target == TOF1) {
+    start_manual_calibration(TOF1);
+  } else if (target == TOF2) {
+    start_manual_calibration(TOF2);
+  } else {
+    calibration_error_msg = "Demarrage de calibration invalide.";
+  }
+
+  return calibration_json_for_usb();
+}
+
+String usb_calibration_action_json(const char *action, int value, bool has_value) {
+  calibration_error_msg = "";
+  String cmd = action ? String(action) : String();
+
+  if (cmd == "cancel") {
+    restore_saved_calibration();
+    return calibration_json_for_usb();
+  }
+
+  if (cmd == "calibrate_tof" && calibration_step == CAL_VERIFY) {
+    if (value != TOF1 && value != TOF2) {
+      calibration_error_msg = "TOF a calibrer invalide.";
+      return calibration_json_for_usb();
+    }
+    save_draft_to_preferences();
+    distance_sensors_calibrated = true;
+    start_manual_calibration(value);
+    return calibration_json_for_usb();
+  }
+
+  if (cmd == "go_noise" && calibration_step == CAL_VERIFY) {
+    save_draft_to_preferences();
+    distance_sensors_calibrated = true;
+    start_noise_calibration(false);
+    return calibration_json_for_usb();
+  }
+
+  if (cmd == "restart") {
+    int manual_target = manual_calibration_target();
+    if (calibration_mode == CAL_MODE_VERIFY_ONLY) {
+      start_verify_calibration();
+    } else if (calibration_mode == CAL_MODE_NOISE_ONLY) {
+      start_noise_calibration(true);
+    } else if (noise_step_index(calibration_step) >= 0 || calibration_step == CAL_NOISE_DONE) {
+      start_noise_calibration(false);
+    } else if (calibration_mode == CAL_MODE_INITIAL_BOTH || manual_target == 0) {
+      start_initial_calibration();
+    } else {
+      start_manual_calibration(manual_target);
+    }
+    return calibration_json_for_usb();
+  }
+
+  if (cmd == "accept" && calibration_step == CAL_VERIFY) {
+    save_draft_to_preferences();
+    distance_sensors_calibrated = true;
+    servo_calibration_initial_in_progress = false;
+    if (calibration_mode == CAL_MODE_INITIAL_BOTH) {
+      start_noise_calibration(false);
+    } else {
+      calibration_flow_done = true;
+    }
+    return calibration_json_for_usb();
+  }
+
+  if (cmd == "accept" && calibration_step == CAL_NOISE_DONE) {
+    set_noise_rejection_profile(calibration_noise.position_mm,
+                                calibration_noise.position_noise_mm,
+                                calibration_noise.speed_noise_mm_s,
+                                NOISE_PROFILE_POINT_COUNT);
+    set_tof_position_noise_profile(TOF1,
+                                   calibration_noise.tof1_position_noise_mm,
+                                   NOISE_PROFILE_POINT_COUNT);
+    set_tof_position_noise_profile(TOF2,
+                                   calibration_noise.tof2_position_noise_mm,
+                                   NOISE_PROFILE_POINT_COUNT);
+    save_draft_to_preferences();
+    distance_sensors_calibrated = true;
+    servo_calibration_initial_in_progress = false;
+    calibration_flow_done = true;
+    return calibration_json_for_usb();
+  }
+
+  if (cmd == "real_fov") {
+    int tof_number = current_calibration_tof();
+    if (tof_number == 0 || !has_value || value <= 0) {
+      calibration_error_msg = "Distance FOV invalide.";
+      return calibration_json_for_usb();
+    }
+    draft_for_tof(tof_number).real_fov = value;
+    calibration_step = next_step_after_fov_distance(tof_number);
+    return calibration_json_for_usb();
+  }
+
+  if (cmd == "done") {
+    int noise_index = noise_step_index(calibration_step);
+    if (noise_index >= 0) {
+      int target_position_mm = calibration_noise.position_mm[noise_index];
+      int position_noise_mm = DEFAULT_POSITION_NOISE_DEADBAND_MM;
+      int speed_noise_mm_s = DEFAULT_SPEED_NOISE_DEADBAND_MM_S;
+      int tof1_position_noise_mm = DEFAULT_POSITION_NOISE_DEADBAND_MM;
+      int tof2_position_noise_mm = DEFAULT_POSITION_NOISE_DEADBAND_MM;
+
+      update_tof_distances();
+      bool position_valid = compute_ball_position();
+      int current_position_mm = position_valid ? get_ball_position() : -1;
+      if (current_position_mm < 0 ||
+          abs(current_position_mm - target_position_mm) > NOISE_CAPTURE_TARGET_TOLERANCE_MM) {
+        calibration_error_msg = "Balle hors de la zone de capture. Placez-la pres de la cible avant de mesurer le bruit.";
+        return calibration_json_for_usb();
+      }
+
+      if (!capture_noise_estimate(target_position_mm,
+                                  &position_noise_mm,
+                                  &speed_noise_mm_s,
+                                  &tof1_position_noise_mm,
+                                  &tof2_position_noise_mm)) {
+        calibration_error_msg = "Impossible de mesurer le bruit. Verifiez que la balle est immobile et visible.";
+        return calibration_json_for_usb();
+      }
+
+      calibration_noise.position_noise_mm[noise_index] = position_noise_mm;
+      calibration_noise.speed_noise_mm_s[noise_index] = speed_noise_mm_s;
+      calibration_noise.tof1_position_noise_mm[noise_index] = tof1_position_noise_mm;
+      calibration_noise.tof2_position_noise_mm[noise_index] = tof2_position_noise_mm;
+      calibration_step = noise_step_for_index(noise_index + 1);
+      return calibration_json_for_usb();
+    }
+
+    int tof_number = current_calibration_tof();
+    int average_mm = -1;
+    if (tof_number == 0 || !capture_raw_average(tof_number, &average_mm)) {
+      calibration_error_msg = "Impossible de moyenner une mesure brute valide.";
+      return calibration_json_for_usb();
+    }
+
+    TofCalibrationDraft &draft = draft_for_tof(tof_number);
+    switch (calibration_step) {
+      case CAL_TOF1_FIND_FOV:
+      case CAL_TOF2_FIND_FOV:
+        draft.meas_fov = average_mm;
+        calibration_step = (tof_number == TOF1) ? CAL_TOF1_ENTER_FOV_DISTANCE : CAL_TOF2_ENTER_FOV_DISTANCE;
+        break;
+      case CAL_TOF1_PLACE_145:
+      case CAL_TOF2_PLACE_145:
+        draft.meas_145 = average_mm;
+        calibration_step = next_step_after_target(tof_number, 145);
+        break;
+      case CAL_TOF1_PLACE_72:
+      case CAL_TOF2_PLACE_72:
+        draft.meas_72 = average_mm;
+        calibration_step = next_step_after_target(tof_number, 72);
+        break;
+      case CAL_TOF1_PLACE_0:
+      case CAL_TOF2_PLACE_0:
+        draft.meas_0 = average_mm;
+        calibration_step = next_step_after_target(tof_number, 0);
+        break;
+      default:
+        calibration_error_msg = "Action Done impossible a cette etape.";
+        break;
+    }
+    return calibration_json_for_usb();
+  }
+
+  calibration_error_msg = "Commande de calibration inconnue.";
+  return calibration_json_for_usb();
+}
+
+static String servo_calibration_json_for_usb(bool ok = true) {
+  String json = build_servo_calibration_state_json(ok);
+  if (json.length() > 1 && json[0] == '{') {
+    json = "{\"servo_calibration\":true," + json.substring(1);
+  }
+  return json;
+}
+
+String usb_servo_calibration_state_json(void) {
+  return servo_calibration_json_for_usb();
+}
+
+String usb_servo_calibration_start_json(bool initial_mode) {
+  start_servo_calibration(initial_mode);
+  return servo_calibration_json_for_usb();
+}
+
+String usb_servo_calibration_action_json(const char *action,
+                                         int value,
+                                         bool has_value,
+                                         int min_angle,
+                                         int max_angle,
+                                         int limit_min,
+                                         int limit_max,
+                                         int offset_us,
+                                         int step_us) {
+  calibration_error_msg = "";
+  String cmd = action ? String(action) : String();
+
+  if (cmd == "preview") {
+    if (!set_servo_calibration_draft(min_angle, max_angle, limit_min, limit_max, offset_us)) {
+      calibration_error_msg = "Angles servo invalides.";
+      return servo_calibration_json_for_usb(false);
+    }
+    return servo_calibration_json_for_usb();
+  }
+
+  if (cmd == "pwm") {
+    if (!has_value || !set_servo_calibration_pulse_us((uint16_t)value)) {
+      calibration_error_msg = "PWM servo invalide.";
+      return servo_calibration_json_for_usb(false);
+    }
+    return servo_calibration_json_for_usb();
+  }
+
+  if (cmd == "offset") {
+    int offset = (int)get_servo_current_pulse_us() - SERVO_CMD_NEUTRAL_PULSE_US;
+    calibration_servo.neutral_offset_us = offset;
+    if (!set_servo_neutral_offset_us(offset)) {
+      calibration_error_msg = "Offset servo invalide.";
+      return servo_calibration_json_for_usb(false);
+    }
+    set_servo_angle(get_servo_neutral_angle_deg());
+    reset_controller();
+    return servo_calibration_json_for_usb();
+  }
+
+  if (cmd == "angle") {
+    if (!has_value) {
+      calibration_error_msg = "Angle servo invalide.";
+      return servo_calibration_json_for_usb(false);
+    }
+    set_servo_angle(value);
+    return servo_calibration_json_for_usb();
+  }
+
+  if (cmd == "neutral") {
+    set_servo_calibration_pulse_us(SERVO_CMD_NEUTRAL_PULSE_US);
+    return servo_calibration_json_for_usb();
+  }
+
+  if (cmd == "save") {
+    if (step_us < 1 || step_us > 100) {
+      calibration_error_msg = "Pas PWM invalide.";
+      return servo_calibration_json_for_usb(false);
+    }
+    calibration_servo.pwm_step_us = step_us;
+
+    if (!set_servo_calibration_draft(min_angle, max_angle, limit_min, limit_max, offset_us)) {
+      calibration_error_msg = "Angles servo invalides. Verifiez que min < max et que les valeurs restent entre 0 et 180 deg.";
+      return servo_calibration_json_for_usb(false);
+    }
+
+    set_servo_angle(get_servo_neutral_angle_deg());
+    reset_controller();
+
+    if (distance_sensors_calibrated) {
+      save_servo_calibration_to_preferences();
+      save_advanced_settings();
+    }
+
+    return servo_calibration_json_for_usb();
+  }
+
+  calibration_error_msg = "Commande servo inconnue.";
+  return servo_calibration_json_for_usb(false);
 }
 
 static bool reject_if_usb_blocks_web(void);
@@ -3016,4 +3316,40 @@ bool save_persistent_advanced_settings(void) {
 
 bool load_persistent_advanced_settings(void) {
   return load_advanced_settings();
+}
+
+void reset_persistent_advanced_settings(void) {
+  reset_all_advanced_parameters();
+}
+
+int get_manual_angle_step_deg(void) {
+  return manual_angle_step_deg;
+}
+
+bool set_manual_angle_step_deg(int step_deg) {
+  if (step_deg < MANUAL_ANGLE_MIN_STEP_DEG || step_deg > MANUAL_ANGLE_MAX_STEP_DEG) {
+    return false;
+  }
+  manual_angle_step_deg = step_deg;
+  return true;
+}
+
+int get_plot_max_seconds_value(void) {
+  return plot_max_seconds;
+}
+
+bool set_plot_max_seconds_value(int seconds) {
+  return set_plot_max_seconds(seconds);
+}
+
+int get_servo_pwm_step_us(void) {
+  return calibration_servo.pwm_step_us;
+}
+
+bool set_servo_pwm_step_us(int step_us) {
+  if (step_us < 1 || step_us > 100) {
+    return false;
+  }
+  calibration_servo.pwm_step_us = step_us;
+  return true;
 }

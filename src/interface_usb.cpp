@@ -130,7 +130,41 @@ static void send_state(void) {
   json += "\"alpha_beta_max_alpha\":" + String(ab_max_alpha, 4) + ",";
   json += "\"alpha_beta_min_beta\":" + String(ab_min_beta, 4) + ",";
   json += "\"alpha_beta_max_beta\":" + String(ab_max_beta, 4) + ",";
+  json += "\"manual_angle_step\":" + String(get_manual_angle_step_deg()) + ",";
+  json += "\"plot_max_s\":" + String(get_plot_max_seconds_value()) + ",";
   json += "\"wifi_ssid\":\"" + String(get_wifi_ap_ssid()) + "\"";
+  json += "}";
+  usb_send(json);
+}
+
+static void send_advanced_state(bool ok = true, bool saved = false) {
+  float ab_min_alpha = 0.0f, ab_max_alpha = 0.0f;
+  float ab_min_beta = 0.0f, ab_max_beta = 0.0f;
+  get_alpha_beta_parameters(&ab_min_alpha, &ab_max_alpha, &ab_min_beta, &ab_max_beta);
+
+  String json = "{";
+  json += "\"ok\":" + String(ok ? "true" : "false") + ",";
+  json += "\"advanced\":true,";
+  json += "\"saved\":" + String(saved ? "true" : "false") + ",";
+  json += "\"max_control_speed\":" + String(get_controller_max_control_speed_mm_s()) + ",";
+  json += "\"alpha_beta_min_alpha\":" + String(ab_min_alpha, 4) + ",";
+  json += "\"alpha_beta_max_alpha\":" + String(ab_max_alpha, 4) + ",";
+  json += "\"alpha_beta_min_beta\":" + String(ab_min_beta, 4) + ",";
+  json += "\"alpha_beta_max_beta\":" + String(ab_max_beta, 4) + ",";
+  json += "\"controller_period\":" + String(get_controller_period_ms()) + ",";
+  json += "\"max_step\":" + String(get_controller_max_step_deg()) + ",";
+  json += "\"position_deadband\":" + String(get_controller_stabilization_position_deadband_mm()) + ",";
+  json += "\"speed_deadband\":" + String(get_controller_stabilization_speed_deadband_mm_s()) + ",";
+  json += "\"stable_time\":" + String(get_controller_stable_time_ms()) + ",";
+  json += "\"idle_exit_percent\":" + String(get_controller_idle_exit_percent()) + ",";
+  json += "\"lost_delay\":" + String(get_controller_lost_ball_delay_ms()) + ",";
+  json += "\"lost_iter\":" + String(get_controller_lost_ball_iter()) + ",";
+  json += "\"servo_min\":" + String(get_servo_min_angle_deg()) + ",";
+  json += "\"servo_max\":" + String(get_servo_max_angle_deg()) + ",";
+  json += "\"servo_step_us\":" + String(get_servo_pwm_step_us()) + ",";
+  json += "\"manual_angle_step\":" + String(get_manual_angle_step_deg()) + ",";
+  json += "\"table_length\":" + String(get_table_length_mm()) + ",";
+  json += "\"plot_max_s\":" + String(get_plot_max_seconds_value());
   json += "}";
   usb_send(json);
 }
@@ -165,6 +199,12 @@ static void handle_params(const String &line, bool save) {
 static void handle_advanced(const String &line, bool save) {
   if (!require_usb_client()) return;
 
+  bool ok = true;
+
+  if (json_has_key(line, "max_speed")) {
+    ok = set_controller_max_control_speed_mm_s(json_get_int(line, "max_speed", get_controller_max_control_speed_mm_s())) && ok;
+  }
+
   float ab_min_alpha = 0.0f, ab_max_alpha = 0.0f;
   float ab_min_beta = 0.0f, ab_max_beta = 0.0f;
   get_alpha_beta_parameters(&ab_min_alpha, &ab_max_alpha, &ab_min_beta, &ab_max_beta);
@@ -174,19 +214,57 @@ static void handle_advanced(const String &line, bool save) {
   if (json_has_key(line, "ab_min_beta")) ab_min_beta = json_get_float(line, "ab_min_beta", ab_min_beta);
   if (json_has_key(line, "ab_max_beta")) ab_max_beta = json_get_float(line, "ab_max_beta", ab_max_beta);
 
-  bool ok = set_alpha_beta_parameters(ab_min_alpha, ab_max_alpha, ab_min_beta, ab_max_beta);
+  if (json_has_key(line, "ab_min_alpha") || json_has_key(line, "ab_max_alpha") ||
+      json_has_key(line, "ab_min_beta") || json_has_key(line, "ab_max_beta")) {
+    ok = set_alpha_beta_parameters(ab_min_alpha, ab_max_alpha, ab_min_beta, ab_max_beta) && ok;
+  }
+
+  if (json_has_key(line, "ctrl_period")) {
+    ok = set_controller_period_ms((uint32_t)json_get_int(line, "ctrl_period", get_controller_period_ms())) && ok;
+  }
+  if (json_has_key(line, "max_step")) {
+    ok = set_controller_max_step_deg(json_get_int(line, "max_step", get_controller_max_step_deg())) && ok;
+  }
+  if (json_has_key(line, "pos_db")) {
+    ok = set_controller_stabilization_position_deadband_mm(json_get_int(line, "pos_db", get_controller_stabilization_position_deadband_mm())) && ok;
+  }
+  if (json_has_key(line, "speed_db")) {
+    ok = set_controller_stabilization_speed_deadband_mm_s(json_get_int(line, "speed_db", get_controller_stabilization_speed_deadband_mm_s())) && ok;
+  }
+  if (json_has_key(line, "stable_time")) {
+    ok = set_controller_stable_time_ms((uint32_t)json_get_int(line, "stable_time", get_controller_stable_time_ms())) && ok;
+  }
+  if (json_has_key(line, "idle_exit")) {
+    ok = set_controller_idle_exit_percent(json_get_int(line, "idle_exit", get_controller_idle_exit_percent())) && ok;
+  }
+  if (json_has_key(line, "lost_delay")) {
+    ok = set_controller_lost_ball_delay_ms((uint32_t)json_get_int(line, "lost_delay", get_controller_lost_ball_delay_ms())) && ok;
+  }
+  if (json_has_key(line, "lost_iter")) {
+    ok = set_controller_lost_ball_iter(json_get_int(line, "lost_iter", get_controller_lost_ball_iter())) && ok;
+  }
+  if (json_has_key(line, "servo_min") || json_has_key(line, "servo_max")) {
+    int servo_min = json_get_int(line, "servo_min", get_servo_min_angle_deg());
+    int servo_max = json_get_int(line, "servo_max", get_servo_max_angle_deg());
+    ok = set_servo_angle_limits(servo_min, servo_max) && ok;
+    reset_controller();
+  }
+  if (json_has_key(line, "servo_step")) {
+    ok = set_servo_pwm_step_us(json_get_int(line, "servo_step", get_servo_pwm_step_us())) && ok;
+  }
+  if (json_has_key(line, "manual_step")) {
+    ok = set_manual_angle_step_deg(json_get_int(line, "manual_step", get_manual_angle_step_deg())) && ok;
+  }
+  if (json_has_key(line, "table_len")) {
+    ok = set_table_length_mm(json_get_int(line, "table_len", get_table_length_mm())) && ok;
+  }
+  if (json_has_key(line, "plot_max")) {
+    ok = set_plot_max_seconds_value(json_get_int(line, "plot_max", get_plot_max_seconds_value())) && ok;
+  }
+
   bool saved = ok && save ? save_persistent_advanced_settings() : false;
 
-  get_alpha_beta_parameters(&ab_min_alpha, &ab_max_alpha, &ab_min_beta, &ab_max_beta);
-  String json = "{";
-  json += "\"ok\":" + String(ok ? "true" : "false") + ",";
-  json += "\"saved\":" + String(saved ? "true" : "false") + ",";
-  json += "\"alpha_beta_min_alpha\":" + String(ab_min_alpha, 4) + ",";
-  json += "\"alpha_beta_max_alpha\":" + String(ab_max_alpha, 4) + ",";
-  json += "\"alpha_beta_min_beta\":" + String(ab_min_beta, 4) + ",";
-  json += "\"alpha_beta_max_beta\":" + String(ab_max_beta, 4);
-  json += "}";
-  usb_send(json);
+  send_advanced_state(ok, saved);
 }
 
 static void handle_command(const String &line) {
@@ -255,8 +333,80 @@ static void handle_command(const String &line) {
     return;
   }
 
+  if (cmd == "advanced") {
+    if (!require_usb_client()) return;
+    send_advanced_state();
+    return;
+  }
+
   if (cmd == "advanced_save") {
     handle_advanced(line, true);
+    return;
+  }
+
+  if (cmd == "advanced_reset") {
+    if (!require_usb_client()) return;
+    reset_persistent_advanced_settings();
+    send_advanced_state();
+    return;
+  }
+
+  if (cmd == "calibration_state") {
+    if (!require_usb_client()) return;
+    usb_send(usb_calibration_state_json());
+    return;
+  }
+
+  if (cmd == "calibration_start") {
+    if (!require_usb_client()) return;
+    String mode = json_get_string(line, "mode");
+    int target = json_get_int(line, "target", 0);
+    usb_send(usb_calibration_start_json(mode.c_str(), target));
+    return;
+  }
+
+  if (cmd == "calibration_action") {
+    if (!require_usb_client()) return;
+    String action = json_get_string(line, "action");
+    bool has_value = json_has_key(line, "value");
+    int value = json_get_int(line, "value", 0);
+    usb_send(usb_calibration_action_json(action.c_str(), value, has_value));
+    return;
+  }
+
+  if (cmd == "servo_calibration_state") {
+    if (!require_usb_client()) return;
+    usb_send(usb_servo_calibration_state_json());
+    return;
+  }
+
+  if (cmd == "servo_calibration_start") {
+    if (!require_usb_client()) return;
+    bool initial_mode = json_get_bool(line, "initial", false);
+    usb_send(usb_servo_calibration_start_json(initial_mode));
+    return;
+  }
+
+  if (cmd == "servo_calibration_action") {
+    if (!require_usb_client()) return;
+    String action = json_get_string(line, "action");
+    bool has_value = json_has_key(line, "value");
+    int value = json_get_int(line, "value", 0);
+    int min_angle = json_get_int(line, "min", get_servo_theoretical_min_angle_deg());
+    int max_angle = json_get_int(line, "max", get_servo_theoretical_max_angle_deg());
+    int limit_min = json_get_int(line, "limit_min", get_servo_min_angle_deg());
+    int limit_max = json_get_int(line, "limit_max", get_servo_max_angle_deg());
+    int offset_us = json_get_int(line, "offset", get_servo_neutral_offset_us());
+    int step_us = json_get_int(line, "step", get_servo_pwm_step_us());
+    usb_send(usb_servo_calibration_action_json(action.c_str(),
+                                               value,
+                                               has_value,
+                                               min_angle,
+                                               max_angle,
+                                               limit_min,
+                                               limit_max,
+                                               offset_us,
+                                               step_us));
     return;
   }
 

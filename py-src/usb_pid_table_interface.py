@@ -15,7 +15,7 @@ except ImportError:
 
 
 REFRESH_MS = 60
-PLOT_MAX_S = 30
+PLOT_DEFAULT_MAX_S = 30
 
 
 class SerialLink:
@@ -86,10 +86,14 @@ class Plot:
         self.canvas = canvas
         self.color = color
         self.label = label
+        self.max_seconds = PLOT_DEFAULT_MAX_S
         self.data = []
         self.lost = []
         self.plot_start = time.monotonic()
         self.last_t = 0.0
+
+    def set_max_seconds(self, seconds):
+        self.max_seconds = max(1, int(seconds))
 
     def reset(self):
         self.data.clear()
@@ -101,7 +105,7 @@ class Plot:
         t = time.monotonic() - self.plot_start
         self.last_t = t
         self.data.append((t, value, lost))
-        min_t = max(0, t - PLOT_MAX_S)
+        min_t = max(0, t - self.max_seconds)
         self.data = [p for p in self.data if p[0] >= min_t]
 
     def draw(self, state):
@@ -111,8 +115,8 @@ class Plot:
         c.delete("all")
         p = 42
         top = 18
-        x0 = max(0, self.last_t - PLOT_MAX_S)
-        x1 = max(PLOT_MAX_S, self.last_t)
+        x0 = max(0, self.last_t - self.max_seconds)
+        x1 = max(self.max_seconds, self.last_t)
 
         vals = [v for t, v, lost in self.data if not lost and isinstance(v, (int, float)) and math.isfinite(v)]
         if self.label == "pos":
@@ -170,6 +174,31 @@ class Plot:
                 c.create_text(p + 4 + i * span, h - 12, text=text, anchor="w", fill=self.color, font=("Arial", 9, "bold"))
 
 
+class ScrollableFrame(ttk.Frame):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.canvas = tk.Canvas(self, highlightthickness=0, bg="#f4f1e8")
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.inner = ttk.Frame(self.canvas)
+        self.window_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
+        self.inner.bind("<Configure>", self._on_inner_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+
+    def _on_inner_configure(self, _event):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfigure(self.window_id, width=event.width)
+
+    def _on_mousewheel(self, event):
+        if self.winfo_toplevel().focus_get() is not None:
+            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+
 class PIDTableApp:
     def __init__(self, root):
         self.root = root
@@ -181,6 +210,11 @@ class PIDTableApp:
         self.plot_running = False
         self.tune_draft = None
         self.first_run = True
+        self.current_page = "dashboard"
+        self.calibration_active = False
+        self.servo_calibration_active = False
+        self.servo_state = {}
+        self.plots_layout_narrow = None
 
         self._build()
         self._refresh_ports()
@@ -188,6 +222,9 @@ class PIDTableApp:
 
     def _build(self):
         self.root.configure(bg="#f4f1e8")
+        style = ttk.Style()
+        style.configure("Run.TButton", foreground="#0b6b2b")
+        style.configure("Stop.TButton", foreground="#9b1c1c")
         top = ttk.Frame(self.root, padding=8)
         top.pack(fill="x")
         ttk.Label(top, text="COM").pack(side="left")
@@ -200,6 +237,19 @@ class PIDTableApp:
         self.status_var = tk.StringVar(value="Disconnected")
         ttk.Label(top, textvariable=self.status_var).pack(side="left", padx=12)
 
+        nav = ttk.Frame(self.root, padding=(8, 0, 8, 4))
+        nav.pack(fill="x")
+        self.nav_buttons = {}
+        for name, label in (
+            ("dashboard", "Dashboard"),
+            ("calibration", "Calibrations"),
+            ("advanced", "Advanced parameters"),
+            ("more", "More"),
+        ):
+            btn = ttk.Button(nav, text=label, command=lambda n=name: self._show_page(n))
+            btn.pack(side="left", padx=(0, 6))
+            self.nav_buttons[name] = btn
+
         self.welcome = ttk.LabelFrame(self.root, text="Bienvenue", padding=10)
         self.welcome.pack(fill="x", padx=8, pady=4)
         ttk.Label(
@@ -208,8 +258,26 @@ class PIDTableApp:
             wraplength=900,
         ).pack(anchor="w")
 
-        main = ttk.Frame(self.root, padding=8)
-        main.pack(fill="both", expand=True)
+        self.scroller = ScrollableFrame(self.root)
+        self.scroller.pack(fill="both", expand=True)
+        self.body = ttk.Frame(self.scroller.inner, padding=8)
+        self.body.pack(fill="both", expand=True)
+        self.pages = {}
+        self._build_dashboard_page()
+        self._build_calibration_page()
+        self._build_advanced_page()
+        self._build_more_page()
+        self._show_page("dashboard")
+
+    def _build_dashboard_page(self):
+        main = ttk.Frame(self.body)
+        self.pages["dashboard"] = main
+
+        wifi = ttk.LabelFrame(main, text="WiFi name", padding=8)
+        wifi.pack(fill="x", pady=(0, 8))
+        self.ssid_var = tk.StringVar()
+        ttk.Entry(wifi, textvariable=self.ssid_var, width=32).pack(side="left")
+        ttk.Button(wifi, text="Save WiFi name", command=self._save_wifi_name).pack(side="left", padx=6)
 
         self.scene = tk.Canvas(main, height=260, bg="#fffdf6", highlightthickness=2, highlightbackground="#202020")
         self.scene.pack(fill="x", pady=(0, 8))
@@ -225,8 +293,10 @@ class PIDTableApp:
         self.pos_canvas = tk.Canvas(self.plots_frame, height=230, bg="#fffdf6", highlightthickness=2, highlightbackground="#202020")
         self.speed_canvas = tk.Canvas(self.plots_frame, height=230, bg="#fffdf6", highlightthickness=2, highlightbackground="#202020")
         for i, canvas in enumerate((self.angle_canvas, self.pos_canvas, self.speed_canvas)):
-            canvas.grid(row=0, column=i, sticky="nsew", padx=4)
+            canvas.grid(row=0, column=i, sticky="nsew", padx=4, pady=2)
             self.plots_frame.columnconfigure(i, weight=1)
+        self.plots_frame.rowconfigure(0, weight=1)
+        self.root.bind("<Configure>", self._layout_plots)
 
         self.angle_plot = Plot(self.angle_canvas, "#c43131", "angle")
         self.pos_plot = Plot(self.pos_canvas, "#2457b8", "pos")
@@ -247,10 +317,14 @@ class PIDTableApp:
         manual.pack(side="left", fill="x", expand=True, padx=4)
         self.stab_btn = ttk.Button(manual, text="Stabilization", command=self._toggle_stabilization)
         self.stab_btn.grid(row=0, column=0, columnspan=3, pady=4)
-        ttk.Button(manual, text="-", command=lambda: self._manual_step(-1)).grid(row=1, column=0)
+        self.neutral_btn = ttk.Button(manual, text="Neutral pos", command=self._neutral_position)
+        self.neutral_btn.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 5))
+        self.manual_minus_btn = ttk.Button(manual, text="-", command=lambda: self._manual_step(-1))
+        self.manual_minus_btn.grid(row=2, column=0)
         self.angle_var = tk.StringVar(value="--")
-        ttk.Label(manual, textvariable=self.angle_var, width=8, anchor="center").grid(row=1, column=1)
-        ttk.Button(manual, text="+", command=lambda: self._manual_step(1)).grid(row=1, column=2)
+        ttk.Label(manual, textvariable=self.angle_var, width=8, anchor="center").grid(row=2, column=1)
+        self.manual_plus_btn = ttk.Button(manual, text="+", command=lambda: self._manual_step(1))
+        self.manual_plus_btn.grid(row=2, column=2)
 
         tune = ttk.LabelFrame(bottom, text="Alpha / Beta", padding=8)
         tune.pack(side="left", fill="x", expand=True, padx=(4, 0))
@@ -261,14 +335,155 @@ class PIDTableApp:
         self._tune_row(tune, "max beta", "ab_max_beta", 3)
         ttk.Button(tune, text="Save alpha/beta", command=self._save_tune).grid(row=4, column=0, columnspan=4, pady=5)
 
-        wifi = ttk.LabelFrame(main, text="WiFi name", padding=8)
-        wifi.pack(fill="x", pady=(8, 0))
-        self.ssid_var = tk.StringVar()
-        ttk.Entry(wifi, textvariable=self.ssid_var, width=32).pack(side="left")
-        ttk.Button(wifi, text="Save WiFi name", command=self._save_wifi_name).pack(side="left", padx=6)
+    def _build_calibration_page(self):
+        page = ttk.Frame(self.body)
+        self.pages["calibration"] = page
 
-        more = ttk.LabelFrame(main, text="More", padding=8)
-        more.pack(fill="x", pady=8)
+        self.calibration_views = {}
+
+        menu = ttk.Frame(page)
+        self.calibration_views["menu"] = menu
+        intro = ttk.LabelFrame(menu, text="Calibrations", padding=10)
+        intro.pack(fill="x")
+        ttk.Label(
+            intro,
+            text="Choisissez le type de calibration a effectuer.",
+            wraplength=1000,
+        ).pack(anchor="w", pady=(0, 8))
+        ttk.Button(intro, text="Calibrer les TOFs", command=lambda: self._show_calibration_view("tof_menu")).pack(side="left", padx=(0, 8))
+        ttk.Button(intro, text="Calibrer le servomoteur", command=self._servo_calibration_start).pack(side="left")
+
+        tof_menu = ttk.Frame(page)
+        self.calibration_views["tof_menu"] = tof_menu
+        tof = ttk.LabelFrame(tof_menu, text="Calibration TOF et bruit", padding=10)
+        tof.pack(fill="x")
+        ttk.Label(
+            tof,
+            text="Selectionnez une procedure TOF ou noise rejection.",
+            wraplength=1000,
+        ).pack(anchor="w", pady=(0, 8))
+        for label, cmd in (
+            ("Calibrate TOF1", lambda: self._calibration_start(target=1)),
+            ("Calibrate TOF2", lambda: self._calibration_start(target=2)),
+            ("Verify calibration", lambda: self._calibration_start(mode="verify")),
+            ("Noise rejection", lambda: self._calibration_start(mode="noise")),
+            ("Verify noise rejection", lambda: self._calibration_start(mode="noise_result")),
+        ):
+            ttk.Button(tof, text=label, command=cmd).pack(side="left", padx=(0, 6), pady=(0, 8))
+        ttk.Button(tof_menu, text="Retour", command=lambda: self._show_calibration_view("menu")).pack(anchor="w", pady=8)
+
+        tof_process = ttk.Frame(page)
+        self.calibration_views["tof_process"] = tof_process
+        ttk.Button(tof_process, text="Retour", command=self._back_to_tof_menu).pack(anchor="w", pady=(0, 8))
+        self.cal_scene = tk.Canvas(tof_process, height=260, bg="#fffdf6", highlightthickness=2, highlightbackground="#202020")
+        self.cal_scene.pack(fill="x", pady=8)
+        self.cal_title = tk.StringVar(value="No calibration running")
+        self.cal_instruction = tk.StringVar(value="Choose a calibration mode.")
+        ttk.Label(tof_process, textvariable=self.cal_title, font=("Arial", 13, "bold")).pack(anchor="w")
+        ttk.Label(tof_process, textvariable=self.cal_instruction, wraplength=1000).pack(anchor="w", pady=(2, 8))
+        self.cal_value = tk.StringVar()
+        value_row = ttk.Frame(tof_process)
+        value_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(value_row, text="Value").pack(side="left")
+        ttk.Entry(value_row, textvariable=self.cal_value, width=10).pack(side="left", padx=5)
+        for label, action in (
+            ("Done", lambda: self._calibration_action("done")),
+            ("Submit FOV", lambda: self._calibration_action("real_fov", value=self.cal_value.get())),
+            ("Accept", lambda: self._calibration_action("accept")),
+            ("Restart", lambda: self._calibration_action("restart")),
+            ("Go to noise rejection", lambda: self._calibration_action("go_noise")),
+            ("Cancel", lambda: self._calibration_action("cancel")),
+        ):
+            ttk.Button(value_row, text=label, command=action).pack(side="left", padx=(0, 5))
+        self.cal_status = tk.StringVar(value="")
+        ttk.Label(tof_process, textvariable=self.cal_status, wraplength=1000).pack(anchor="w")
+
+        servo_page = ttk.Frame(page)
+        self.calibration_views["servo"] = servo_page
+        ttk.Button(servo_page, text="Retour", command=self._back_to_calibration_menu).pack(anchor="w", pady=(0, 8))
+        servo = ttk.LabelFrame(servo_page, text="Servo calibration", padding=8)
+        servo.pack(fill="x", pady=(12, 0))
+        self.servo_pwm = tk.StringVar(value="1500")
+        pwm_row = ttk.Frame(servo)
+        pwm_row.pack(fill="x", pady=(0, 8))
+        ttk.Button(pwm_row, text="-", width=4, command=lambda: self._servo_pwm_step(-1)).pack(side="left")
+        ttk.Label(pwm_row, textvariable=self.servo_pwm, width=8, anchor="center", font=("Arial", 14, "bold")).pack(side="left", padx=6)
+        ttk.Button(pwm_row, text="+", width=4, command=lambda: self._servo_pwm_step(1)).pack(side="left")
+        self.servo_vars = {}
+        servo_fields = [
+            ("min", "Angle at 1000 us"),
+            ("max", "Angle at 2000 us"),
+            ("limit_min", "Min allowed angle"),
+            ("limit_max", "Max allowed angle"),
+            ("offset", "Neutral offset us"),
+            ("step", "PWM step us"),
+        ]
+        form = ttk.Frame(servo)
+        form.pack(fill="x")
+        for i, (key, label) in enumerate(servo_fields):
+            row, col = divmod(i, 2)
+            ttk.Label(form, text=label).grid(row=row, column=col * 2, sticky="w", padx=(0, 5), pady=2)
+            var = tk.StringVar()
+            ttk.Entry(form, textvariable=var, width=12).grid(row=row, column=col * 2 + 1, sticky="w", padx=(0, 20), pady=2)
+            self.servo_vars[key] = var
+        servo_buttons = ttk.Frame(servo)
+        servo_buttons.pack(fill="x", pady=(8, 0))
+        ttk.Button(servo_buttons, text="Neutral pos", command=lambda: self._servo_action("neutral")).pack(side="left", padx=(0, 6))
+        ttk.Button(servo_buttons, text="Set pos offset", command=lambda: self._servo_action("offset")).pack(side="left", padx=(0, 6))
+        ttk.Button(servo_buttons, text="Preview", command=lambda: self._servo_action("preview")).pack(side="left", padx=(0, 6))
+        ttk.Button(servo_buttons, text="Save servo", command=lambda: self._servo_action("save")).pack(side="left")
+        self.servo_status = tk.StringVar(value="Click Servo calibration to start.")
+        ttk.Label(servo, textvariable=self.servo_status, wraplength=1000).pack(anchor="w", pady=(6, 0))
+
+        self._show_calibration_view("menu")
+
+    def _build_advanced_page(self):
+        page = ttk.Frame(self.body)
+        self.pages["advanced"] = page
+        grid = ttk.LabelFrame(page, text="Advanced parameters", padding=8)
+        grid.pack(fill="x")
+        self.advanced_vars = {}
+        fields = [
+            ("max_speed", "Max control speed"),
+            ("ab_min_alpha", "Min alpha"),
+            ("ab_max_alpha", "Max alpha"),
+            ("ab_min_beta", "Min beta"),
+            ("ab_max_beta", "Max beta"),
+            ("ctrl_period", "Controller period ms"),
+            ("max_step", "Max servo step deg"),
+            ("pos_db", "Position deadband mm"),
+            ("speed_db", "Speed deadband mm/s"),
+            ("stable_time", "Stable time ms"),
+            ("idle_exit", "Idle exit percent"),
+            ("lost_delay", "Lost ball delay ms"),
+            ("lost_iter", "Lost ball iter"),
+            ("servo_min", "Servo min deg"),
+            ("servo_max", "Servo max deg"),
+            ("servo_step", "Servo PWM step us"),
+            ("manual_step", "Manual angle step deg"),
+            ("table_len", "Table length mm"),
+            ("plot_max", "Plot max s"),
+        ]
+        for i, (key, label) in enumerate(fields):
+            row, col = divmod(i, 2)
+            ttk.Label(grid, text=label).grid(row=row, column=col * 2, sticky="w", padx=(0, 5), pady=2)
+            var = tk.StringVar()
+            ttk.Entry(grid, textvariable=var, width=14).grid(row=row, column=col * 2 + 1, sticky="w", padx=(0, 20), pady=2)
+            self.advanced_vars[key] = var
+        buttons = ttk.Frame(page)
+        buttons.pack(fill="x", pady=8)
+        ttk.Button(buttons, text="Load", command=self._load_advanced).pack(side="left", padx=(0, 6))
+        ttk.Button(buttons, text="Apply", command=lambda: self._send_advanced(save=False)).pack(side="left", padx=(0, 6))
+        ttk.Button(buttons, text="Save", command=lambda: self._send_advanced(save=True)).pack(side="left", padx=(0, 6))
+        ttk.Button(buttons, text="Reset to default values", command=self._reset_advanced).pack(side="left")
+        self.advanced_status = tk.StringVar(value="")
+        ttk.Label(page, textvariable=self.advanced_status).pack(anchor="w")
+
+    def _build_more_page(self):
+        page = ttk.Frame(self.body)
+        self.pages["more"] = page
+        more = ttk.LabelFrame(page, text="More", padding=8)
+        more.pack(fill="x", pady=0)
         ttk.Label(
             more,
             text=(
@@ -281,11 +496,50 @@ class PIDTableApp:
             wraplength=1000,
         ).pack(anchor="w")
 
+    def _show_page(self, name):
+        self.current_page = name
+        for page in self.pages.values():
+            page.pack_forget()
+        self.pages[name].pack(fill="both", expand=True)
+        if name == "calibration":
+            self._show_calibration_view("menu")
+        if name == "advanced" and self.connected:
+            self._load_advanced()
+
+    def _show_calibration_view(self, name):
+        for view in self.calibration_views.values():
+            view.pack_forget()
+        self.calibration_views[name].pack(fill="both", expand=True)
+
     def _entry(self, parent, label, row):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w")
         var = tk.StringVar()
         ttk.Entry(parent, textvariable=var, width=12).grid(row=row, column=1, padx=4)
         return var
+
+    def _layout_plots(self, _event=None):
+        if not hasattr(self, "plots_frame"):
+            return
+        canvases = (self.angle_canvas, self.pos_canvas, self.speed_canvas)
+        narrow = self.root.winfo_width() < 900
+        if self.plots_layout_narrow == narrow:
+            return
+        self.plots_layout_narrow = narrow
+        for canvas in canvases:
+            canvas.grid_forget()
+        for i in range(3):
+            self.plots_frame.columnconfigure(i, weight=0)
+            self.plots_frame.rowconfigure(i, weight=0)
+        if narrow:
+            for i, canvas in enumerate(canvases):
+                canvas.grid(row=i, column=0, sticky="nsew", padx=4, pady=4)
+                self.plots_frame.rowconfigure(i, weight=1)
+            self.plots_frame.columnconfigure(0, weight=1)
+        else:
+            for i, canvas in enumerate(canvases):
+                canvas.grid(row=0, column=i, sticky="nsew", padx=4, pady=2)
+                self.plots_frame.columnconfigure(i, weight=1)
+            self.plots_frame.rowconfigure(0, weight=1)
 
     def _tune_row(self, parent, label, key, row):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w")
@@ -334,6 +588,10 @@ class PIDTableApp:
             self._handle(msg)
         if self.connected:
             self._send({"cmd": "state"})
+            if self.current_page == "calibration" and self.calibration_active:
+                self._send({"cmd": "calibration_state"})
+            if self.current_page == "calibration" and self.servo_calibration_active:
+                self._send({"cmd": "servo_calibration_state"})
         self.root.after(REFRESH_MS, self._poll)
 
     def _handle(self, msg):
@@ -351,6 +609,12 @@ class PIDTableApp:
         if "alpha_beta_min_alpha" in msg and "x" not in msg:
             self.tune_draft = None
             self._apply_tune_state(msg)
+        if msg.get("advanced"):
+            self._apply_advanced_state(msg)
+        if msg.get("calibration"):
+            self._apply_calibration_state(msg)
+        if msg.get("servo_calibration"):
+            self._apply_servo_calibration_state(msg)
         if "x" in msg:
             self.state = msg
             self._update_from_state()
@@ -363,6 +627,19 @@ class PIDTableApp:
         self.kd.set(f"{float(s.get('kd', 0)):.3f}")
         self.angle_var.set(str(s.get("servo_angle", "--")))
         self.ssid_var.set(s.get("wifi_ssid", self.ssid_var.get()))
+        plot_max = int(s.get("plot_max_s", PLOT_DEFAULT_MAX_S))
+        self.angle_plot.set_max_seconds(plot_max)
+        self.pos_plot.set_max_seconds(plot_max)
+        self.speed_plot.set_max_seconds(plot_max)
+        stabilization = bool(s.get("stabilization", False))
+        self.stab_btn.configure(
+            text="Stop stabilization" if stabilization else "Start stabilization",
+            style="Stop.TButton" if stabilization else "Run.TButton",
+        )
+        state = "disabled" if stabilization else "normal"
+        self.manual_minus_btn.configure(state=state)
+        self.manual_plus_btn.configure(state=state)
+        self.neutral_btn.configure(state=state)
         mapping = {
             "ab_min_alpha": "alpha_beta_min_alpha",
             "ab_max_alpha": "alpha_beta_max_alpha",
@@ -430,6 +707,11 @@ class PIDTableApp:
     def _toggle_stabilization(self):
         self._send({"cmd": "control", "stabilization": not self.state.get("stabilization", False)})
 
+    def _neutral_position(self):
+        if self.state.get("stabilization", False):
+            return
+        self._send({"cmd": "control", "angle": self.state.get("servo_neutral", 45)})
+
     def _manual_step(self, direction):
         step = self.state.get("manual_angle_step", 5)
         angle = self.state.get("servo_angle", self.state.get("servo_neutral", 45)) + direction * step
@@ -476,6 +758,233 @@ class PIDTableApp:
             messagebox.showwarning("WiFi", "SSID cannot be empty.")
             return
         self._send({"cmd": "wifi_set", "ssid": ssid})
+
+    def _load_advanced(self):
+        self.advanced_status.set("Loading...")
+        self._send({"cmd": "advanced"})
+
+    def _advanced_payload(self):
+        numeric = {}
+        for key, var in self.advanced_vars.items():
+            text = var.get().strip()
+            if text == "":
+                continue
+            numeric[key] = float(text) if "." in text else int(text)
+        return numeric
+
+    def _send_advanced(self, save=False):
+        try:
+            payload = self._advanced_payload()
+        except ValueError:
+            messagebox.showwarning("Advanced", "All advanced values must be numeric.")
+            return
+        payload["cmd"] = "advanced_save" if save else "advanced_set"
+        self.advanced_status.set("Saving..." if save else "Applying...")
+        self._send(payload)
+
+    def _reset_advanced(self):
+        self.advanced_status.set("Resetting...")
+        self._send({"cmd": "advanced_reset"})
+
+    def _apply_advanced_state(self, msg):
+        mapping = {
+            "max_speed": "max_control_speed",
+            "ab_min_alpha": "alpha_beta_min_alpha",
+            "ab_max_alpha": "alpha_beta_max_alpha",
+            "ab_min_beta": "alpha_beta_min_beta",
+            "ab_max_beta": "alpha_beta_max_beta",
+            "ctrl_period": "controller_period",
+            "max_step": "max_step",
+            "pos_db": "position_deadband",
+            "speed_db": "speed_deadband",
+            "stable_time": "stable_time",
+            "idle_exit": "idle_exit_percent",
+            "lost_delay": "lost_delay",
+            "lost_iter": "lost_iter",
+            "servo_min": "servo_min",
+            "servo_max": "servo_max",
+            "servo_step": "servo_step_us",
+            "manual_step": "manual_angle_step",
+            "table_len": "table_length",
+            "plot_max": "plot_max_s",
+        }
+        for ui_key, state_key in mapping.items():
+            if state_key not in msg:
+                continue
+            value = msg[state_key]
+            if isinstance(value, float):
+                self.advanced_vars[ui_key].set(f"{value:.4f}" if "ab_" in ui_key else f"{value:.2f}")
+            else:
+                self.advanced_vars[ui_key].set(str(value))
+        if msg.get("ok") is False:
+            self.advanced_status.set("Some values were rejected.")
+        elif msg.get("saved"):
+            self.advanced_status.set("Saved.")
+        else:
+            self.advanced_status.set("Loaded / applied.")
+
+    def _calibration_start(self, mode=None, target=None):
+        self.calibration_active = True
+        self.servo_calibration_active = False
+        self._show_calibration_view("tof_process")
+        msg = {"cmd": "calibration_start"}
+        if mode:
+            msg["mode"] = mode
+        if target:
+            msg["target"] = target
+        self._send(msg)
+
+    def _calibration_action(self, action, value=None):
+        self.calibration_active = True
+        self.servo_calibration_active = False
+        self._show_calibration_view("tof_process")
+        msg = {"cmd": "calibration_action", "action": action}
+        if value not in (None, ""):
+            try:
+                msg["value"] = int(float(value))
+            except ValueError:
+                messagebox.showwarning("Calibration", "Value must be numeric.")
+                return
+        self._send(msg)
+
+    def _servo_calibration_start(self):
+        self.servo_calibration_active = True
+        self.calibration_active = False
+        self._show_calibration_view("servo")
+        self.cal_title.set("Servo calibration")
+        self.cal_instruction.set("Placez le servo a 1500 us, ajustez le PWM, puis enregistrez l'offset et les limites.")
+        self.cal_status.set("")
+        self._send({"cmd": "servo_calibration_start", "initial": False})
+
+    def _back_to_tof_menu(self):
+        if self.calibration_active:
+            self._send({"cmd": "calibration_action", "action": "cancel"})
+        self.calibration_active = False
+        self.servo_calibration_active = False
+        self.cal_title.set("No calibration running")
+        self.cal_instruction.set("Choose a calibration mode.")
+        self.cal_status.set("")
+        self._show_calibration_view("tof_menu")
+
+    def _back_to_calibration_menu(self):
+        self.calibration_active = False
+        self.servo_calibration_active = False
+        self._show_calibration_view("menu")
+
+    def _servo_payload(self):
+        payload = {}
+        for key, var in self.servo_vars.items():
+            text = var.get().strip()
+            if text:
+                payload[key] = int(float(text))
+        return payload
+
+    def _servo_action(self, action):
+        self.servo_calibration_active = True
+        self.calibration_active = False
+        try:
+            payload = self._servo_payload()
+        except ValueError:
+            messagebox.showwarning("Servo", "Servo calibration values must be numeric.")
+            return
+        payload["cmd"] = "servo_calibration_action"
+        payload["action"] = action
+        self._send(payload)
+
+    def _servo_pwm_step(self, direction):
+        self.servo_calibration_active = True
+        self.calibration_active = False
+        try:
+            step = int(float(self.servo_vars["step"].get() or 10))
+            pwm = int(float(self.servo_pwm.get() or 1500)) + direction * step
+        except ValueError:
+            messagebox.showwarning("Servo", "PWM and step must be numeric.")
+            return
+        pwm = max(1000, min(2000, pwm))
+        self.servo_pwm.set(str(pwm))
+        self._send({"cmd": "servo_calibration_action", "action": "pwm", "value": pwm})
+
+    def _apply_calibration_state(self, msg):
+        self.cal_title.set(msg.get("title", "Calibration"))
+        self.cal_instruction.set(msg.get("instruction", ""))
+        status = []
+        if "step" in msg:
+            status.append(f"Step: {msg['step']}")
+        if "x" in msg:
+            status.append(f"x={msg['x']} mm")
+        if "d1" in msg and "d2" in msg:
+            status.append(f"d1={msg['d1']} mm | d2={msg['d2']} mm")
+        if msg.get("error"):
+            status.append(str(msg["error"]))
+        self.cal_status.set(" | ".join(status))
+        self._draw_calibration_scene(msg)
+
+    def _apply_servo_calibration_state(self, msg):
+        self.servo_state = msg
+        mapping = {
+            "min": "theoretical_min_angle",
+            "max": "theoretical_max_angle",
+            "limit_min": "limit_min_angle",
+            "limit_max": "limit_max_angle",
+            "offset": "neutral_offset_us",
+            "step": "pwm_step_us",
+        }
+        for ui_key, state_key in mapping.items():
+            if state_key in msg:
+                self.servo_vars[ui_key].set(str(msg[state_key]))
+        self.servo_pwm.set(str(msg.get("current_pwm_us", self.servo_pwm.get())))
+        self._draw_servo_scene(msg)
+        status = (
+            f"Servo={msg.get('current_angle', '--')} deg | "
+            f"Neutral={msg.get('neutral_angle', '--')} deg | "
+            f"PWM={msg.get('current_pwm_us', '--')} us"
+        )
+        if msg.get("error"):
+            status += f" | {msg['error']}"
+        self.servo_status.set(status)
+
+    def _draw_calibration_scene(self, msg):
+        c = self.cal_scene
+        w = max(1, c.winfo_width())
+        h = max(1, c.winfo_height())
+        c.delete("all")
+        table_len = max(1, int(msg.get("table_length", self.state.get("table_length", 290))))
+        x1, x2, y = w * 0.15, w * 0.85, h * 0.52
+        c.create_line(x1, y, x2, y, width=4)
+        c.create_polygon(w * 0.5, y + 8, w * 0.46, y + h * 0.20, w * 0.54, y + h * 0.20, outline="#171717", fill="", width=3)
+        for mm in (0, 72, 145, 218, 290):
+            p = max(0, min(table_len, mm)) / table_len
+            x = x1 + (x2 - x1) * p
+            c.create_line(x, y + 24, x, y + 58, fill="#208444", width=3)
+            c.create_text(x, y + 78, text=str(mm), fill="#208444")
+        live = msg.get("visual_pos_mm", msg.get("x", -1))
+        target = msg.get("visual_target_mm", -1)
+        if isinstance(target, (int, float)) and target >= 0:
+            tx = x1 + (x2 - x1) * (max(0, min(table_len, target)) / table_len)
+            c.create_oval(tx - 17, y - 42, tx + 17, y - 8, outline="#2457b8", dash=(6, 4), width=3)
+        if isinstance(live, (int, float)) and live >= 0:
+            bx = x1 + (x2 - x1) * (max(0, min(table_len, live)) / table_len)
+            c.create_oval(bx - 16, y - 42, bx + 16, y - 10, outline="#171717", width=3)
+        else:
+            c.create_text(w * 0.5, y - 30, text="Ball lost", fill="#c43131", font=("Arial", 13, "bold"))
+
+    def _draw_servo_scene(self, msg):
+        c = self.cal_scene
+        w = max(1, c.winfo_width())
+        h = max(1, c.winfo_height())
+        c.delete("all")
+        current = float(msg.get("current_angle", 45))
+        neutral = float(msg.get("neutral_angle", 45))
+        table_deg = current - neutral
+        a = -math.radians(table_deg)
+        cx, cy, length = w * 0.5, h * 0.56, w * 0.72
+        ux, uy = math.cos(a), math.sin(a)
+        x1, y1 = cx - ux * length / 2, cy - uy * length / 2
+        x2, y2 = cx + ux * length / 2, cy + uy * length / 2
+        c.create_line(x1, y1, x2, y2, width=4)
+        c.create_polygon(cx, cy + 8, cx - w * 0.035, cy + h * 0.22, cx + w * 0.035, cy + h * 0.22, outline="#171717", fill="", width=3)
+        c.create_text(18, h - 76, text=f"servo={current:.0f} deg", anchor="w", font=("Arial", 12))
+        c.create_text(18, h - 24, text=f"table={table_deg:.1f} deg", anchor="w", font=("Arial", 12))
 
 
 if __name__ == "__main__":
