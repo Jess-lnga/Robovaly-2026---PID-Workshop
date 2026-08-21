@@ -22,6 +22,8 @@ bool launch_interface_web(void);
 bool load_startup_persistent_settings(void);
 bool wifi_interface_client_connected(void);
 bool wifi_interface_has_priority(void);
+void set_wifi_interface_available(bool available);
+bool wifi_interface_available(void);
 bool set_wifi_ap_ssid(const char *ssid);
 const char *get_wifi_ap_ssid(void);
 bool save_persistent_controller_settings(void);

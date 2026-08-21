@@ -90,10 +90,20 @@ static void mark_usb_client_active(void) {
   usb_last_client_ms = millis();
 }
 
+static void activate_usb_interface_owner(void) {
+  mark_usb_client_active();
+  set_wifi_interface_available(false);
+  set_controller_enabled(false);
+}
+
 static void disconnect_usb_client(void) {
   bool was_present = usb_client_present;
   usb_client_present = false;
   usb_last_client_ms = 0;
+
+  if (was_present) {
+    set_wifi_interface_available(true);
+  }
 
   if (was_present && !wifi_interface_client_connected()) {
     set_controller_enabled(true);
@@ -288,8 +298,7 @@ static void handle_command(const String &line) {
       send_busy("wifi");
       return;
     }
-    mark_usb_client_active();
-    set_controller_enabled(false);
+    activate_usb_interface_owner();
     usb_send("{\"ok\":true,\"connected\":true}");
     return;
   }

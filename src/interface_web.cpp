@@ -43,6 +43,7 @@ static WebServer server(80);
 static TaskHandle_t web_task_handle = nullptr;
 static bool distance_sensors_calibrated = false;
 static char wifi_ap_ssid[33] = "Kit_Robovaly";
+static bool wifi_ap_available_flag = true;
 
 enum CalibrationStep {
   CAL_TOF1_FIND_FOV,
@@ -137,9 +138,12 @@ static uint32_t last_client_mode_update_ms = 0;
 static int plot_max_seconds = PLOT_DEFAULT_MAX_SECONDS;
 static int manual_angle_step_deg = MANUAL_ANGLE_DEFAULT_STEP_DEG;
 static bool web_client_present = false;
+static bool wifi_web_owner_present = false;
+static uint32_t wifi_web_owner_last_ms = 0;
 static bool auto_stabilization_without_client = false;
 static bool client_mode_initialized = false;
 static bool neutral_return_pending = false;
+static const uint32_t WIFI_WEB_OWNER_TIMEOUT_MS = 3000;
 
 static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!doctype html>
@@ -2126,6 +2130,25 @@ static void step_servo_to_neutral(void) {
   set_controller_manual_angle(next_angle);
 }
 
+static bool wifi_web_owner_active(void) {
+  if (!wifi_web_owner_present) {
+    return false;
+  }
+  if (millis() - wifi_web_owner_last_ms > WIFI_WEB_OWNER_TIMEOUT_MS) {
+    wifi_web_owner_present = false;
+    return false;
+  }
+  return true;
+}
+
+static void mark_wifi_web_owner_active(void) {
+  if (!wifi_ap_available_flag || usb_interface_has_priority()) {
+    return;
+  }
+  wifi_web_owner_present = true;
+  wifi_web_owner_last_ms = millis();
+}
+
 static void update_web_client_control_mode(void) {
   if (!distance_sensors_calibrated) {
     return;
@@ -2139,7 +2162,8 @@ static void update_web_client_control_mode(void) {
   }
 
   uint32_t now = millis();
-  bool has_client = WiFi.softAPgetStationNum() > 0;
+  bool has_client = wifi_ap_available_flag &&
+                    (WiFi.softAPgetStationNum() > 0 || wifi_web_owner_active());
 
   if (!client_mode_initialized || has_client != web_client_present) {
     client_mode_initialized = true;
@@ -3174,6 +3198,7 @@ static bool usb_blocks_web_control(void) {
 
 static bool reject_if_usb_blocks_web(void) {
   if (!usb_blocks_web_control()) {
+    mark_wifi_web_owner_active();
     return false;
   }
 
@@ -3192,6 +3217,14 @@ static void load_wifi_settings(void) {
   strlcpy(wifi_ap_ssid, saved_ssid.c_str(), sizeof(wifi_ap_ssid));
 }
 
+static bool start_wifi_ap_if_available(void) {
+  if (!wifi_ap_available_flag) {
+    return false;
+  }
+  WiFi.mode(WIFI_AP);
+  return WiFi.softAP(wifi_ap_ssid, AP_PASS);
+}
+
 static void web_task(void *pv) {
   (void)pv;
 
@@ -3206,8 +3239,7 @@ static void web_task(void *pv) {
     reset_controller();
   }
 
-  WiFi.mode(WIFI_AP);
-  bool ap_ok = WiFi.softAP(wifi_ap_ssid, AP_PASS);
+  bool ap_ok = start_wifi_ap_if_available();
   delay(200);
 
   Serial.printf("\nWeb AP %s: %s\n", wifi_ap_ssid, ap_ok ? "OK" : "FAIL");
@@ -3256,11 +3288,36 @@ bool load_startup_persistent_settings(void) {
 }
 
 bool wifi_interface_client_connected(void) {
-  return WiFi.softAPgetStationNum() > 0;
+  return wifi_ap_available_flag &&
+         (WiFi.softAPgetStationNum() > 0 || wifi_web_owner_active());
 }
 
 bool wifi_interface_has_priority(void) {
   return wifi_interface_client_connected() && !usb_interface_has_priority();
+}
+
+void set_wifi_interface_available(bool available) {
+  if (wifi_ap_available_flag == available) {
+    return;
+  }
+
+  wifi_ap_available_flag = available;
+  web_client_present = false;
+  wifi_web_owner_present = false;
+  wifi_web_owner_last_ms = 0;
+  client_mode_initialized = false;
+  neutral_return_pending = false;
+
+  if (available) {
+    start_wifi_ap_if_available();
+  } else {
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+  }
+}
+
+bool wifi_interface_available(void) {
+  return wifi_ap_available_flag;
 }
 
 bool set_wifi_ap_ssid(const char *ssid) {
@@ -3288,7 +3345,7 @@ bool set_wifi_ap_ssid(const char *ssid) {
   prefs.end();
 
   wifi_mode_t mode = WiFi.getMode();
-  if ((mode & WIFI_AP) != 0) {
+  if (wifi_ap_available_flag && (mode & WIFI_AP) != 0) {
     WiFi.softAPdisconnect(true);
     delay(100);
     WiFi.softAP(wifi_ap_ssid, AP_PASS);

@@ -177,6 +177,75 @@ class Plot:
                 c.create_text(p + 4 + i * span, h - 12, text=text, anchor="w", fill=self.color, font=("Arial", 9, "bold"))
 
 
+class NoiseComparisonPlot:
+    def __init__(self, canvas, label, color):
+        self.canvas = canvas
+        self.label = label
+        self.color = color
+        self.data = []
+        self.start = time.monotonic()
+        self.last_t = 0.0
+
+    def reset(self):
+        self.data.clear()
+        self.start = time.monotonic()
+        self.last_t = 0.0
+
+    def add(self, raw, filtered, lost=False):
+        t = time.monotonic() - self.start
+        self.last_t = t
+        self.data.append((t, raw, filtered, lost))
+        min_t = max(0, t - 10.0)
+        self.data = [p for p in self.data if p[0] >= min_t]
+
+    def draw(self, table_len=290):
+        c = self.canvas
+        w = max(1, c.winfo_width())
+        h = max(1, c.winfo_height())
+        c.delete("all")
+        pad = 40
+        top = 18
+        x0 = max(0, self.last_t - 10.0)
+        x1 = max(10.0, self.last_t)
+        values = []
+        for _, raw, filtered, lost in self.data:
+            if not lost:
+                values.extend(v for v in (raw, filtered) if isinstance(v, (int, float)) and math.isfinite(v))
+        if self.label == "pos":
+            ymin, ymax = 0, max(1, table_len)
+            unit = "mm"
+        else:
+            m = max([100] + [abs(v) for v in values])
+            ymax = math.ceil(m / 50) * 50
+            ymin = -ymax
+            unit = "mm/s"
+
+        def xp(t):
+            return pad + (t - x0) / max(0.001, x1 - x0) * (w - pad - 14)
+
+        def yp(v):
+            return h - pad - (v - ymin) / max(0.001, ymax - ymin) * (h - pad - top)
+
+        c.create_line(pad, top, pad, h - pad, w - 12, h - pad, width=3)
+        c.create_text(pad + 8, top + 12, text=f"{self.label} raw / filtered", anchor="w", font=("Arial", 10, "bold"))
+        c.create_text(w - 12, top + 12, text=unit, anchor="e", fill="#666")
+
+        for idx, color in ((1, "#8b8b8b"), (2, self.color)):
+            last = None
+            for sample in self.data:
+                t, raw, filtered, lost = sample
+                value = sample[idx]
+                if lost or not isinstance(value, (int, float)) or not math.isfinite(value):
+                    last = None
+                    continue
+                x, y = xp(t), yp(value)
+                if last:
+                    c.create_line(last[0], last[1], x, y, fill=color, width=3 if idx == 2 else 2)
+                last = (x, y)
+
+        c.create_text(pad + 8, h - 12, text="grey: raw   color: after noise rejection", anchor="w", fill="#555", font=("Arial", 9, "bold"))
+
+
 class ScrollableFrame(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
@@ -212,6 +281,10 @@ class PIDTableApp:
         self.state = {}
         self.plot_running = False
         self.tune_draft = None
+        self.pid_editing = False
+        self.pid_updating = False
+        self.pid_pending = None
+        self.pid_pending_until = 0.0
         self.first_run = True
         self.current_page = "dashboard"
         self.calibration_active = False
@@ -221,6 +294,8 @@ class PIDTableApp:
         self.cal_button_layout_key = None
         self.verify_view = "both"
         self.verify_arrows_visible = False
+        self.noise_last_step = ""
+        self.noise_result_readonly = False
         self.cal_pending_action_until = 0.0
         self.cal_pending_action = None
         self.cal_pending_req = 0
@@ -327,6 +402,8 @@ class PIDTableApp:
         self.kp = self._entry(pid, "Kp", 1)
         self.ki = self._entry(pid, "Ki", 2)
         self.kd = self._entry(pid, "Kd", 3)
+        for var in (self.ref, self.kp, self.ki, self.kd):
+            var.trace_add("write", self._mark_pid_editing)
         ttk.Button(pid, text="Apply", command=self._apply_pid).grid(row=4, column=0, pady=6)
         ttk.Button(pid, text="Save", command=self._save_pid).grid(row=4, column=1, pady=6)
 
@@ -424,6 +501,18 @@ class PIDTableApp:
         }
         self.cal_status = tk.StringVar(value="")
         ttk.Label(tof_process, textvariable=self.cal_status, wraplength=1000).pack(anchor="w")
+        self.noise_plot_frame = ttk.LabelFrame(tof_process, text="Noise rejection verification", padding=8)
+        self.noise_pos_canvas = tk.Canvas(self.noise_plot_frame, height=230, bg="#fffdf6", highlightthickness=2, highlightbackground="#202020")
+        self.noise_speed_canvas = tk.Canvas(self.noise_plot_frame, height=230, bg="#fffdf6", highlightthickness=2, highlightbackground="#202020")
+        self.noise_pos_canvas.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        self.noise_speed_canvas.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        self.noise_plot_frame.columnconfigure(0, weight=1)
+        self.noise_plot_frame.columnconfigure(1, weight=1)
+        self.noise_pos_plot = NoiseComparisonPlot(self.noise_pos_canvas, "pos", "#2457b8")
+        self.noise_speed_plot = NoiseComparisonPlot(self.noise_speed_canvas, "speed", "#c43131")
+        self.noise_plot_visible = False
+        self.noise_last_raw_pos = None
+        self.noise_last_raw_t = None
 
         servo_page = ttk.Frame(page)
         self.calibration_views["servo"] = servo_page
@@ -657,10 +746,19 @@ class PIDTableApp:
 
     def _update_from_state(self):
         s = self.state
-        self.ref.set(str(s.get("ref", "")))
-        self.kp.set(f"{float(s.get('kp', 0)):.3f}")
-        self.ki.set(f"{float(s.get('ki', 0)):.3f}")
-        self.kd.set(f"{float(s.get('kd', 0)):.3f}")
+        if self.pid_pending is not None:
+            if self._pid_state_matches(s, self.pid_pending) or time.monotonic() > self.pid_pending_until:
+                self.pid_pending = None
+                self.pid_editing = False
+            else:
+                self._set_pid_fields(self.pid_pending)
+        if self.pid_pending is None and not self.pid_editing:
+            self._set_pid_fields({
+                "ref": int(s.get("ref", 0)),
+                "kp": float(s.get("kp", 0)),
+                "ki": float(s.get("ki", 0)),
+                "kd": float(s.get("kd", 0)),
+            })
         self.angle_var.set(str(s.get("servo_angle", "--")))
         self.ssid_var.set(s.get("wifi_ssid", self.ssid_var.get()))
         plot_max = int(s.get("plot_max_s", PLOT_DEFAULT_MAX_S))
@@ -743,6 +841,36 @@ class PIDTableApp:
     def _toggle_stabilization(self):
         self._send({"cmd": "control", "stabilization": not self.state.get("stabilization", False)})
 
+    def _mark_pid_editing(self, *_args):
+        if not self.pid_updating:
+            self.pid_editing = True
+
+    def _set_pid_fields(self, values):
+        self.pid_updating = True
+        try:
+            self.ref.set(str(int(values.get("ref", 0))))
+            self.kp.set(f"{float(values.get('kp', 0)):.3f}")
+            self.ki.set(f"{float(values.get('ki', 0)):.3f}")
+            self.kd.set(f"{float(values.get('kd', 0)):.3f}")
+        finally:
+            self.pid_updating = False
+
+    def _read_pid_fields(self):
+        return {
+            "ref": int(float(self.ref.get())),
+            "kp": float(self.kp.get()),
+            "ki": float(self.ki.get()),
+            "kd": float(self.kd.get()),
+        }
+
+    def _pid_state_matches(self, state, values):
+        return (
+            int(state.get("ref", -999999)) == int(values["ref"]) and
+            abs(float(state.get("kp", 0)) - float(values["kp"])) < 0.0005 and
+            abs(float(state.get("ki", 0)) - float(values["ki"])) < 0.0005 and
+            abs(float(state.get("kd", 0)) - float(values["kd"])) < 0.0005
+        )
+
     def _neutral_position(self):
         if self.state.get("stabilization", False):
             return
@@ -754,10 +882,16 @@ class PIDTableApp:
         self._send({"cmd": "control", "angle": angle})
 
     def _apply_pid(self):
-        self._send({"cmd": "params", "ref": int(float(self.ref.get())), "kp": float(self.kp.get()), "ki": float(self.ki.get()), "kd": float(self.kd.get())})
+        values = self._read_pid_fields()
+        self.pid_pending = values
+        self.pid_pending_until = time.monotonic() + 2.0
+        self._send({"cmd": "params", **values})
 
     def _save_pid(self):
-        self._send({"cmd": "params_save", "ref": int(float(self.ref.get())), "kp": float(self.kp.get()), "ki": float(self.ki.get()), "kd": float(self.kd.get())})
+        values = self._read_pid_fields()
+        self.pid_pending = values
+        self.pid_pending_until = time.monotonic() + 2.0
+        self._send({"cmd": "params_save", **values})
 
     def _step_tune(self, key, delta):
         current = float(self.tune_vars[key].get() if self.tune_vars[key].get() != "--" else 0)
@@ -862,6 +996,7 @@ class PIDTableApp:
     def _calibration_start(self, mode=None, target=None):
         self.calibration_active = True
         self.servo_calibration_active = False
+        self.noise_result_readonly = mode == "noise_result"
         self._show_calibration_view("tof_process")
         self.cal_title.set("Starting calibration...")
         self.cal_instruction.set("Waiting for ESP32 calibration state.")
@@ -876,6 +1011,8 @@ class PIDTableApp:
     def _calibration_action(self, action, value=None):
         self.calibration_active = True
         self.servo_calibration_active = False
+        if action == "go_noise":
+            self.noise_result_readonly = False
         self._show_calibration_view("tof_process")
         msg = {"cmd": "calibration_action", "action": action}
         if value not in (None, ""):
@@ -938,6 +1075,11 @@ class PIDTableApp:
     def _calibration_accept_or_done(self):
         step = str(self.cal_state.get("step", ""))
         just_calibrated = int(self.cal_state.get("default_verify_tof", 0) or 0)
+        if step == "noise_done" and self.noise_result_readonly:
+            self.calibration_active = False
+            self.servo_calibration_active = False
+            self._show_calibration_view("tof_menu")
+            return
         if step == "verify" and just_calibrated == 0:
             self.calibration_active = False
             self.servo_calibration_active = False
@@ -1041,7 +1183,50 @@ class PIDTableApp:
             self.calibration_active = False
             self.servo_calibration_active = False
             self._show_calibration_view("tof_menu")
+        self._update_noise_verification_plots(msg, previous_step)
         self.cal_last_action_response = None
+
+    def _update_noise_verification_plots(self, msg, previous_step):
+        step = str(msg.get("step", ""))
+        if step != "noise_done":
+            if self.noise_plot_visible:
+                self.noise_plot_frame.pack_forget()
+                self.noise_plot_visible = False
+            self.noise_last_raw_pos = None
+            self.noise_last_raw_t = None
+            return
+
+        if not self.noise_plot_visible:
+            self.noise_plot_frame.pack(fill="both", expand=True, pady=(10, 0))
+            self.noise_plot_visible = True
+        if previous_step != "noise_done":
+            self.noise_pos_plot.reset()
+            self.noise_speed_plot.reset()
+            self.noise_last_raw_pos = None
+            self.noise_last_raw_t = None
+
+        raw_pos = msg.get("raw_pos_mm", -1)
+        filtered_pos = msg.get("visual_pos_mm", -1)
+        filtered_speed = msg.get("speed_mm_s", 0)
+        lost = (
+            not isinstance(raw_pos, (int, float)) or raw_pos < 0 or
+            not isinstance(filtered_pos, (int, float)) or filtered_pos < 0
+        )
+        now = time.monotonic()
+        raw_speed = math.nan
+        if not lost and self.noise_last_raw_pos is not None and self.noise_last_raw_t is not None and now > self.noise_last_raw_t:
+            raw_speed = (raw_pos - self.noise_last_raw_pos) / (now - self.noise_last_raw_t)
+        if not lost:
+            self.noise_last_raw_pos = raw_pos
+            self.noise_last_raw_t = now
+        else:
+            self.noise_last_raw_pos = None
+            self.noise_last_raw_t = now
+        self.noise_pos_plot.add(raw_pos, filtered_pos, lost)
+        self.noise_speed_plot.add(raw_speed, filtered_speed, lost or not msg.get("speed_valid", False))
+        table_len = int(msg.get("table_length", self.state.get("table_length", 290)))
+        self.noise_pos_plot.draw(table_len)
+        self.noise_speed_plot.draw(table_len)
 
     def _set_verify_arrows_visible(self, visible):
         if visible == self.verify_arrows_visible:
@@ -1089,10 +1274,10 @@ class PIDTableApp:
             visible.append("noise")
 
         if noise_done:
-            self.cal_buttons["accept"].configure(text="Accept")
+            self.cal_buttons["accept"].configure(text="Done" if self.noise_result_readonly else "Accept")
             visible.append("accept")
 
-        show_restart_cancel = not verify or just_calibrated != 0
+        show_restart_cancel = (not verify or just_calibrated != 0) and not (noise_done and self.noise_result_readonly)
         if show_restart_cancel:
             visible.extend(["restart", "cancel"])
 
@@ -1145,12 +1330,22 @@ class PIDTableApp:
         step = str(msg.get("step", ""))
         verify = step == "verify"
         noise_step = step.startswith("noise")
+        noise_done = step == "noise_done"
         tof_number = int(msg.get("tof", 0) or 0)
         focus_tof = 1 if verify and self.verify_view == "tof1" else 2 if verify and self.verify_view == "tof2" else 0
         x1, x2, y = w * 0.15, w * 0.85, h * 0.52
         c.create_line(x1, y, x2, y, width=4)
         c.create_polygon(w * 0.5, y + 8, w * 0.46, y + h * 0.20, w * 0.54, y + h * 0.20, outline="#171717", fill="", width=3)
 
+        if verify or noise_done:
+            if noise_done:
+                c.create_text(w * 0.5, 22, text="Noise rejection verification", fill="#2457b8", font=("Arial", 13, "bold"))
+            for mm in (0, 72, 145, 218, 290):
+                p = max(0, min(table_len, mm)) / table_len
+                x = x1 + (x2 - x1) * p
+                c.create_line(x, y + 24, x, y + 58, fill="#208444", width=3)
+                c.create_polygon(x, y + 18, x - 8, y + 36, x + 8, y + 36, fill="#208444", outline="#208444")
+                c.create_text(x, y + 78, text=str(mm), fill="#208444")
         if verify:
             label = "TOF 1 + TOF 2" if self.verify_view == "both" else "TOF 1 only" if self.verify_view == "tof1" else "TOF 2 only"
             if focus_tof:
@@ -1159,12 +1354,6 @@ class PIDTableApp:
                 c.create_text(label_x, 18, text=label, anchor=anchor, fill="#2457b8", font=("Arial", 10, "bold"))
             else:
                 c.create_text(w * 0.5, 22, text=label, fill="#2457b8", font=("Arial", 13, "bold"))
-            for mm in (0, 72, 145, 218, 290):
-                p = max(0, min(table_len, mm)) / table_len
-                x = x1 + (x2 - x1) * p
-                c.create_line(x, y + 24, x, y + 58, fill="#208444", width=3)
-                c.create_polygon(x, y + 18, x - 8, y + 36, x + 8, y + 36, fill="#208444", outline="#208444")
-                c.create_text(x, y + 78, text=str(mm), fill="#208444")
 
         if tof_number in (1, 2):
             arrow_x = x2 if tof_number == 1 else x1
@@ -1189,7 +1378,7 @@ class PIDTableApp:
             label_x = 18 if focus_tof == 2 else w - 18
             anchor = "w" if focus_tof == 2 else "e"
             c.create_text(label_x, 36, text=f"position: {pos_text}", anchor=anchor, fill="#2457b8", font=("Arial", 10, "bold"))
-        if noise_step and isinstance(target, (int, float)) and target >= 0:
+        if noise_step and not noise_done and isinstance(target, (int, float)) and target >= 0:
             tx = x1 + (x2 - x1) * (max(0, min(table_len, target)) / table_len)
             c.create_line(tx, y + 20, tx, y + 60, fill="#2457b8", dash=(6, 4), width=3)
             c.create_text(tx, y + 82, text=f"target {int(target)}", fill="#2457b8")
