@@ -219,6 +219,8 @@ class PIDTableApp:
         self.cal_state = {}
         self.cal_last_step = ""
         self.cal_button_layout_key = None
+        self.verify_view = "both"
+        self.verify_arrows_visible = False
         self.cal_pending_action_until = 0.0
         self.cal_pending_action = None
         self.cal_pending_req = 0
@@ -390,8 +392,16 @@ class PIDTableApp:
         tof_process = ttk.Frame(page)
         self.calibration_views["tof_process"] = tof_process
         ttk.Button(tof_process, text="Retour", command=self._back_to_tof_menu).pack(anchor="w", pady=(0, 8))
-        self.cal_scene = tk.Canvas(tof_process, height=260, bg="#fffdf6", highlightthickness=2, highlightbackground="#202020")
-        self.cal_scene.pack(fill="x", pady=8)
+        scene_frame = ttk.Frame(tof_process)
+        scene_frame.pack(fill="x", pady=8)
+        self.verify_prev_btn = ttk.Button(scene_frame, text="<", width=4, command=lambda: self._cycle_verify_view(-1))
+        self.verify_prev_btn.pack(side="left", fill="y", padx=(0, 6))
+        self.cal_scene = tk.Canvas(scene_frame, height=260, bg="#fffdf6", highlightthickness=2, highlightbackground="#202020")
+        self.cal_scene.pack(side="left", fill="x", expand=True)
+        self.verify_next_btn = ttk.Button(scene_frame, text=">", width=4, command=lambda: self._cycle_verify_view(1))
+        self.verify_next_btn.pack(side="left", fill="y", padx=(6, 0))
+        self.verify_prev_btn.pack_forget()
+        self.verify_next_btn.pack_forget()
         self.cal_title = tk.StringVar(value="No calibration running")
         self.cal_instruction = tk.StringVar(value="Choose a calibration mode.")
         ttk.Label(tof_process, textvariable=self.cal_title, font=("Arial", 13, "bold")).pack(anchor="w")
@@ -935,6 +945,13 @@ class PIDTableApp:
             return
         self._calibration_action("accept")
 
+    def _cycle_verify_view(self, delta):
+        views = ["both", "tof1", "tof2"]
+        current = self.verify_view if self.verify_view in views else "both"
+        self.verify_view = views[(views.index(current) + delta) % len(views)]
+        if self.cal_state:
+            self._draw_calibration_scene(self.cal_state)
+
     def _servo_calibration_start(self):
         self.servo_calibration_active = True
         self.calibration_active = False
@@ -993,7 +1010,15 @@ class PIDTableApp:
         self._send({"cmd": "servo_calibration_action", "action": "pwm", "value": pwm})
 
     def _apply_calibration_state(self, msg):
+        previous_step = str(self.cal_state.get("step", ""))
         self.cal_state = msg
+        step = str(msg.get("step", ""))
+        if step == "verify" and previous_step != "verify":
+            default_tof = int(msg.get("default_verify_tof", 0) or 0)
+            self.verify_view = "tof1" if default_tof == 1 else "tof2" if default_tof == 2 else "both"
+        elif step != "verify":
+            self.verify_view = "both"
+        self._set_verify_arrows_visible(step == "verify")
         self.cal_title.set(msg.get("title", "Calibration"))
         self.cal_instruction.set(msg.get("instruction", ""))
         self._update_calibration_buttons(msg)
@@ -1017,6 +1042,17 @@ class PIDTableApp:
             self.servo_calibration_active = False
             self._show_calibration_view("tof_menu")
         self.cal_last_action_response = None
+
+    def _set_verify_arrows_visible(self, visible):
+        if visible == self.verify_arrows_visible:
+            return
+        self.verify_arrows_visible = visible
+        if visible:
+            self.verify_prev_btn.pack(side="left", fill="y", padx=(0, 6), before=self.cal_scene)
+            self.verify_next_btn.pack(side="left", fill="y", padx=(6, 0))
+        else:
+            self.verify_prev_btn.pack_forget()
+            self.verify_next_btn.pack_forget()
 
     def _update_calibration_buttons(self, msg):
         for button in self.cal_buttons.values():
@@ -1110,11 +1146,19 @@ class PIDTableApp:
         verify = step == "verify"
         noise_step = step.startswith("noise")
         tof_number = int(msg.get("tof", 0) or 0)
+        focus_tof = 1 if verify and self.verify_view == "tof1" else 2 if verify and self.verify_view == "tof2" else 0
         x1, x2, y = w * 0.15, w * 0.85, h * 0.52
         c.create_line(x1, y, x2, y, width=4)
         c.create_polygon(w * 0.5, y + 8, w * 0.46, y + h * 0.20, w * 0.54, y + h * 0.20, outline="#171717", fill="", width=3)
 
         if verify:
+            label = "TOF 1 + TOF 2" if self.verify_view == "both" else "TOF 1 only" if self.verify_view == "tof1" else "TOF 2 only"
+            if focus_tof:
+                label_x = 18 if focus_tof == 2 else w - 18
+                anchor = "w" if focus_tof == 2 else "e"
+                c.create_text(label_x, 18, text=label, anchor=anchor, fill="#2457b8", font=("Arial", 10, "bold"))
+            else:
+                c.create_text(w * 0.5, 22, text=label, fill="#2457b8", font=("Arial", 13, "bold"))
             for mm in (0, 72, 145, 218, 290):
                 p = max(0, min(table_len, mm)) / table_len
                 x = x1 + (x2 - x1) * p
@@ -1128,15 +1172,30 @@ class PIDTableApp:
             c.create_text(arrow_x, y - 92, text=f"TOF {tof_number}", fill="#2457b8", font=("Arial", 13, "bold"))
             c.create_line(arrow_x, y - 78, arrow_x + direction * 70, y - 36, fill="#2457b8", width=4, arrow=tk.LAST)
 
-        live = msg.get("visual_pos_mm", msg.get("x", -1))
+        if focus_tof == 1:
+            live = msg.get("tof1_pos_mm", -1)
+        elif focus_tof == 2:
+            live = msg.get("tof2_pos_mm", -1)
+        else:
+            live = msg.get("visual_pos_mm", msg.get("x", -1))
         target = msg.get("visual_target_mm", -1)
+        if verify and focus_tof in (1, 2):
+            fov = msg.get("tof1_fov_pos_mm" if focus_tof == 1 else "tof2_fov_pos_mm", -1)
+            if isinstance(fov, (int, float)) and fov >= 0:
+                fx = x1 + (x2 - x1) * (max(0, min(table_len, fov)) / table_len)
+                c.create_line(fx, y - 74, fx, y - 16, fill="#8a4f00", dash=(7, 4), width=3)
+                c.create_text(fx, y - 88, text=f"FOV {int(fov)} mm", fill="#8a4f00", font=("Arial", 11, "bold"))
+            pos_text = f"{int(live)} mm" if isinstance(live, (int, float)) and live >= 0 else "lost"
+            label_x = 18 if focus_tof == 2 else w - 18
+            anchor = "w" if focus_tof == 2 else "e"
+            c.create_text(label_x, 36, text=f"position: {pos_text}", anchor=anchor, fill="#2457b8", font=("Arial", 10, "bold"))
         if noise_step and isinstance(target, (int, float)) and target >= 0:
             tx = x1 + (x2 - x1) * (max(0, min(table_len, target)) / table_len)
             c.create_line(tx, y + 20, tx, y + 60, fill="#2457b8", dash=(6, 4), width=3)
             c.create_text(tx, y + 82, text=f"target {int(target)}", fill="#2457b8")
 
         raw_valid = bool(msg.get("raw_valid", True))
-        ball_lost = not isinstance(live, (int, float)) or live < 0 or (tof_number in (1, 2) and not raw_valid)
+        ball_lost = not isinstance(live, (int, float)) or live < 0 or (tof_number in (1, 2) and not raw_valid and not verify)
         if not ball_lost:
             bx = x1 + (x2 - x1) * (max(0, min(table_len, live)) / table_len)
             c.create_oval(bx - 16, y - 42, bx + 16, y - 10, outline="#171717", width=3)
