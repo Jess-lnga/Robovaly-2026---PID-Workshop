@@ -213,6 +213,11 @@ class PIDTableApp:
         self.current_page = "dashboard"
         self.calibration_active = False
         self.servo_calibration_active = False
+        self.cal_state = {}
+        self.cal_last_step = ""
+        self.cal_pending_action_until = 0.0
+        self.cal_pending_action = None
+        self.cal_last_action_response = None
         self.servo_state = {}
         self.plots_layout_narrow = None
 
@@ -383,18 +388,20 @@ class PIDTableApp:
         ttk.Label(tof_process, textvariable=self.cal_instruction, wraplength=1000).pack(anchor="w", pady=(2, 8))
         self.cal_value = tk.StringVar()
         value_row = ttk.Frame(tof_process)
+        self.cal_action_row = value_row
         value_row.pack(fill="x", pady=(0, 8))
-        ttk.Label(value_row, text="Value").pack(side="left")
-        ttk.Entry(value_row, textvariable=self.cal_value, width=10).pack(side="left", padx=5)
-        for label, action in (
-            ("Done", lambda: self._calibration_action("done")),
-            ("Submit FOV", lambda: self._calibration_action("real_fov", value=self.cal_value.get())),
-            ("Accept", lambda: self._calibration_action("accept")),
-            ("Restart", lambda: self._calibration_action("restart")),
-            ("Go to noise rejection", lambda: self._calibration_action("go_noise")),
-            ("Cancel", lambda: self._calibration_action("cancel")),
-        ):
-            ttk.Button(value_row, text=label, command=action).pack(side="left", padx=(0, 5))
+        self.cal_value_label = ttk.Label(value_row, text="FOV")
+        self.cal_value_entry = ttk.Entry(value_row, textvariable=self.cal_value, width=10)
+        self.cal_buttons = {
+            "done": ttk.Button(value_row, text="Done", command=lambda: self._calibration_action("done")),
+            "submit": ttk.Button(value_row, text="Submit FOV", command=lambda: self._calibration_action("real_fov", value=self.cal_value.get())),
+            "accept": ttk.Button(value_row, text="Accept", command=self._calibration_accept_or_done),
+            "tof1": ttk.Button(value_row, text="Calibrate TOF1", command=lambda: self._calibration_action("calibrate_tof", value=1)),
+            "tof2": ttk.Button(value_row, text="Calibrate TOF2", command=lambda: self._calibration_action("calibrate_tof", value=2)),
+            "noise": ttk.Button(value_row, text="Go to noise rejection", command=lambda: self._calibration_action("go_noise")),
+            "restart": ttk.Button(value_row, text="Restart", command=lambda: self._calibration_action("restart")),
+            "cancel": ttk.Button(value_row, text="Cancel", command=self._back_to_tof_menu),
+        }
         self.cal_status = tk.StringVar(value="")
         ttk.Label(tof_process, textvariable=self.cal_status, wraplength=1000).pack(anchor="w")
 
@@ -588,7 +595,8 @@ class PIDTableApp:
             self._handle(msg)
         if self.connected:
             self._send({"cmd": "state"})
-            if self.current_page == "calibration" and self.calibration_active:
+            pending = time.monotonic() < self.cal_pending_action_until
+            if self.current_page == "calibration" and self.calibration_active and not pending:
                 self._send({"cmd": "calibration_state"})
             if self.current_page == "calibration" and self.servo_calibration_active:
                 self._send({"cmd": "servo_calibration_state"})
@@ -612,6 +620,10 @@ class PIDTableApp:
         if msg.get("advanced"):
             self._apply_advanced_state(msg)
         if msg.get("calibration"):
+            if self.cal_pending_action:
+                self.cal_last_action_response = self.cal_pending_action
+                self.cal_pending_action = None
+                self.cal_pending_action_until = 0.0
             self._apply_calibration_state(msg)
         if msg.get("servo_calibration"):
             self._apply_servo_calibration_state(msg)
@@ -827,11 +839,15 @@ class PIDTableApp:
         self.calibration_active = True
         self.servo_calibration_active = False
         self._show_calibration_view("tof_process")
+        self.cal_title.set("Starting calibration...")
+        self.cal_instruction.set("Waiting for ESP32 calibration state.")
+        self.cal_status.set("")
         msg = {"cmd": "calibration_start"}
         if mode:
             msg["mode"] = mode
         if target:
             msg["target"] = target
+        self._mark_calibration_action_pending("start")
         self._send(msg)
 
     def _calibration_action(self, action, value=None):
@@ -845,7 +861,24 @@ class PIDTableApp:
             except ValueError:
                 messagebox.showwarning("Calibration", "Value must be numeric.")
                 return
+        self._mark_calibration_action_pending(action)
         self._send(msg)
+
+    def _mark_calibration_action_pending(self, action):
+        self.cal_pending_action = action
+        self.cal_pending_action_until = time.monotonic() + 0.8
+        for button in self.cal_buttons.values():
+            button.configure(state="disabled")
+
+    def _calibration_accept_or_done(self):
+        step = str(self.cal_state.get("step", ""))
+        just_calibrated = int(self.cal_state.get("default_verify_tof", 0) or 0)
+        if step == "verify" and just_calibrated == 0:
+            self.calibration_active = False
+            self.servo_calibration_active = False
+            self._show_calibration_view("tof_menu")
+            return
+        self._calibration_action("accept")
 
     def _servo_calibration_start(self):
         self.servo_calibration_active = True
@@ -905,11 +938,17 @@ class PIDTableApp:
         self._send({"cmd": "servo_calibration_action", "action": "pwm", "value": pwm})
 
     def _apply_calibration_state(self, msg):
+        self.cal_state = msg
         self.cal_title.set(msg.get("title", "Calibration"))
         self.cal_instruction.set(msg.get("instruction", ""))
+        self._update_calibration_buttons(msg)
         status = []
         if "step" in msg:
             status.append(f"Step: {msg['step']}")
+        tof_number = int(msg.get("tof", 0) or 0)
+        if tof_number in (1, 2):
+            raw_text = f"{msg.get('raw_mm', '--')} mm" if msg.get("raw_valid", False) else "invalid"
+            status.append(f"TOF {tof_number} measured distance: {raw_text}")
         if "x" in msg:
             status.append(f"x={msg['x']} mm")
         if "d1" in msg and "d2" in msg:
@@ -918,6 +957,56 @@ class PIDTableApp:
             status.append(str(msg["error"]))
         self.cal_status.set(" | ".join(status))
         self._draw_calibration_scene(msg)
+        if msg.get("done") and self.cal_last_action_response == "accept":
+            self.calibration_active = False
+            self.servo_calibration_active = False
+            self._show_calibration_view("tof_menu")
+        self.cal_last_action_response = None
+
+    def _update_calibration_buttons(self, msg):
+        for widget in (self.cal_value_label, self.cal_value_entry, *self.cal_buttons.values()):
+            widget.pack_forget()
+        for button in self.cal_buttons.values():
+            button.configure(state="normal")
+
+        step = str(msg.get("step", ""))
+        needs_real = bool(msg.get("needs_real_input", False)) or step.endswith("_real_fov")
+        needs_done = bool(msg.get("needs_done", False))
+        verify = step == "verify"
+        noise_step = step.startswith("noise")
+        noise_done = step == "noise_done"
+        step_changed = step != self.cal_last_step
+        self.cal_last_step = step
+
+        if needs_real:
+            self.cal_value_label.pack(side="left")
+            self.cal_value_entry.pack(side="left", padx=5)
+            if step_changed or not self.cal_value.get():
+                self.cal_value.set(str(msg.get("real_fov", 145)))
+            self.cal_buttons["submit"].pack(side="left", padx=(0, 5))
+
+        if needs_done:
+            self.cal_buttons["done"].configure(text="Capture bruit" if noise_step and not noise_done else "Done")
+            self.cal_buttons["done"].pack(side="left", padx=(0, 5))
+
+        if verify:
+            just_calibrated = int(msg.get("default_verify_tof", 0))
+            self.cal_buttons["accept"].configure(text="Accept" if just_calibrated else "Done")
+            self.cal_buttons["accept"].pack(side="left", padx=(0, 5))
+            if just_calibrated != 1:
+                self.cal_buttons["tof1"].pack(side="left", padx=(0, 5))
+            if just_calibrated != 2:
+                self.cal_buttons["tof2"].pack(side="left", padx=(0, 5))
+            self.cal_buttons["noise"].pack(side="left", padx=(0, 5))
+
+        if noise_done:
+            self.cal_buttons["accept"].configure(text="Accept")
+            self.cal_buttons["accept"].pack(side="left", padx=(0, 5))
+
+        show_restart_cancel = not verify or int(msg.get("default_verify_tof", 0)) != 0
+        if show_restart_cancel:
+            self.cal_buttons["restart"].pack(side="left", padx=(0, 5))
+            self.cal_buttons["cancel"].pack(side="left", padx=(0, 5))
 
     def _apply_servo_calibration_state(self, msg):
         self.servo_state = msg
@@ -949,24 +1038,44 @@ class PIDTableApp:
         h = max(1, c.winfo_height())
         c.delete("all")
         table_len = max(1, int(msg.get("table_length", self.state.get("table_length", 290))))
+        step = str(msg.get("step", ""))
+        verify = step == "verify"
+        noise_step = step.startswith("noise")
+        tof_number = int(msg.get("tof", 0) or 0)
         x1, x2, y = w * 0.15, w * 0.85, h * 0.52
         c.create_line(x1, y, x2, y, width=4)
         c.create_polygon(w * 0.5, y + 8, w * 0.46, y + h * 0.20, w * 0.54, y + h * 0.20, outline="#171717", fill="", width=3)
-        for mm in (0, 72, 145, 218, 290):
-            p = max(0, min(table_len, mm)) / table_len
-            x = x1 + (x2 - x1) * p
-            c.create_line(x, y + 24, x, y + 58, fill="#208444", width=3)
-            c.create_text(x, y + 78, text=str(mm), fill="#208444")
+
+        if verify:
+            for mm in (0, 72, 145, 218, 290):
+                p = max(0, min(table_len, mm)) / table_len
+                x = x1 + (x2 - x1) * p
+                c.create_line(x, y + 24, x, y + 58, fill="#208444", width=3)
+                c.create_polygon(x, y + 18, x - 8, y + 36, x + 8, y + 36, fill="#208444", outline="#208444")
+                c.create_text(x, y + 78, text=str(mm), fill="#208444")
+
+        if tof_number in (1, 2):
+            arrow_x = x2 if tof_number == 1 else x1
+            direction = -1 if tof_number == 1 else 1
+            c.create_text(arrow_x, y - 92, text=f"TOF {tof_number}", fill="#2457b8", font=("Arial", 13, "bold"))
+            c.create_line(arrow_x, y - 78, arrow_x + direction * 70, y - 36, fill="#2457b8", width=4, arrow=tk.LAST)
+
         live = msg.get("visual_pos_mm", msg.get("x", -1))
         target = msg.get("visual_target_mm", -1)
-        if isinstance(target, (int, float)) and target >= 0:
+        if noise_step and isinstance(target, (int, float)) and target >= 0:
             tx = x1 + (x2 - x1) * (max(0, min(table_len, target)) / table_len)
-            c.create_oval(tx - 17, y - 42, tx + 17, y - 8, outline="#2457b8", dash=(6, 4), width=3)
-        if isinstance(live, (int, float)) and live >= 0:
+            c.create_line(tx, y + 20, tx, y + 60, fill="#2457b8", dash=(6, 4), width=3)
+            c.create_text(tx, y + 82, text=f"target {int(target)}", fill="#2457b8")
+
+        raw_valid = bool(msg.get("raw_valid", True))
+        ball_lost = not isinstance(live, (int, float)) or live < 0 or (tof_number in (1, 2) and not raw_valid)
+        if not ball_lost:
             bx = x1 + (x2 - x1) * (max(0, min(table_len, live)) / table_len)
             c.create_oval(bx - 16, y - 42, bx + 16, y - 10, outline="#171717", width=3)
         else:
-            c.create_text(w * 0.5, y - 30, text="Ball lost", fill="#c43131", font=("Arial", 13, "bold"))
+            bx = (x1 + x2) * 0.5
+            c.create_oval(bx - 16, y - 42, bx + 16, y - 10, outline="#c43131", dash=(6, 4), width=3)
+            c.create_text(w * 0.5, y - 58, text="Ball lost", fill="#c43131", font=("Arial", 13, "bold"))
 
     def _draw_servo_scene(self, msg):
         c = self.cal_scene

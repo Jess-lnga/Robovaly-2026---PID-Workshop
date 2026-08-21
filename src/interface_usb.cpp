@@ -22,6 +22,13 @@ static void usb_send(const String &json) {
   Serial.println(json);
 }
 
+static String json_with_flag(const String &json, const char *flag) {
+  if (json.length() > 1 && json[0] == '{') {
+    return String("{\"") + flag + "\":true," + json.substring(1);
+  }
+  return json;
+}
+
 static bool json_has_key(const String &json, const char *key) {
   String pattern = "\"" + String(key) + "\"";
   return json.indexOf(pattern) >= 0;
@@ -361,7 +368,7 @@ static void handle_command(const String &line) {
     if (!require_usb_client()) return;
     String mode = json_get_string(line, "mode");
     int target = json_get_int(line, "target", 0);
-    usb_send(usb_calibration_start_json(mode.c_str(), target));
+    usb_send(json_with_flag(usb_calibration_start_json(mode.c_str(), target), "action_response"));
     return;
   }
 
@@ -370,7 +377,7 @@ static void handle_command(const String &line) {
     String action = json_get_string(line, "action");
     bool has_value = json_has_key(line, "value");
     int value = json_get_int(line, "value", 0);
-    usb_send(usb_calibration_action_json(action.c_str(), value, has_value));
+    usb_send(json_with_flag(usb_calibration_action_json(action.c_str(), value, has_value), "action_response"));
     return;
   }
 
@@ -383,7 +390,7 @@ static void handle_command(const String &line) {
   if (cmd == "servo_calibration_start") {
     if (!require_usb_client()) return;
     bool initial_mode = json_get_bool(line, "initial", false);
-    usb_send(usb_servo_calibration_start_json(initial_mode));
+    usb_send(json_with_flag(usb_servo_calibration_start_json(initial_mode), "action_response"));
     return;
   }
 
@@ -398,15 +405,16 @@ static void handle_command(const String &line) {
     int limit_max = json_get_int(line, "limit_max", get_servo_max_angle_deg());
     int offset_us = json_get_int(line, "offset", get_servo_neutral_offset_us());
     int step_us = json_get_int(line, "step", get_servo_pwm_step_us());
-    usb_send(usb_servo_calibration_action_json(action.c_str(),
-                                               value,
-                                               has_value,
-                                               min_angle,
-                                               max_angle,
-                                               limit_min,
-                                               limit_max,
-                                               offset_us,
-                                               step_us));
+    usb_send(json_with_flag(usb_servo_calibration_action_json(action.c_str(),
+                                                              value,
+                                                              has_value,
+                                                              min_angle,
+                                                              max_angle,
+                                                              limit_min,
+                                                              limit_max,
+                                                              offset_us,
+                                                              step_us),
+                            "action_response"));
     return;
   }
 
