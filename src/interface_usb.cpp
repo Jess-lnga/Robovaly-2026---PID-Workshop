@@ -17,14 +17,20 @@ static bool usb_client_present = false;
 static uint32_t usb_last_client_ms = 0;
 static char usb_line[USB_LINE_MAX];
 static size_t usb_line_len = 0;
+static int last_calibration_request_id = 0;
+static String last_calibration_response;
 
 static void usb_send(const String &json) {
   Serial.println(json);
 }
 
-static String json_with_flag(const String &json, const char *flag) {
+static String json_with_flag(const String &json, const char *flag, int request_id = 0) {
   if (json.length() > 1 && json[0] == '{') {
-    return String("{\"") + flag + "\":true," + json.substring(1);
+    String prefix = String("{\"") + flag + "\":true,";
+    if (request_id > 0) {
+      prefix += "\"req\":" + String(request_id) + ",";
+    }
+    return prefix + json.substring(1);
   }
   return json;
 }
@@ -368,7 +374,14 @@ static void handle_command(const String &line) {
     if (!require_usb_client()) return;
     String mode = json_get_string(line, "mode");
     int target = json_get_int(line, "target", 0);
-    usb_send(json_with_flag(usb_calibration_start_json(mode.c_str(), target), "action_response"));
+    int request_id = json_get_int(line, "req", 0);
+    if (request_id > 0 && request_id == last_calibration_request_id && last_calibration_response.length() > 0) {
+      usb_send(last_calibration_response);
+      return;
+    }
+    last_calibration_request_id = request_id;
+    last_calibration_response = json_with_flag(usb_calibration_start_json(mode.c_str(), target), "action_response", request_id);
+    usb_send(last_calibration_response);
     return;
   }
 
@@ -377,7 +390,14 @@ static void handle_command(const String &line) {
     String action = json_get_string(line, "action");
     bool has_value = json_has_key(line, "value");
     int value = json_get_int(line, "value", 0);
-    usb_send(json_with_flag(usb_calibration_action_json(action.c_str(), value, has_value), "action_response"));
+    int request_id = json_get_int(line, "req", 0);
+    if (request_id > 0 && request_id == last_calibration_request_id && last_calibration_response.length() > 0) {
+      usb_send(last_calibration_response);
+      return;
+    }
+    last_calibration_request_id = request_id;
+    last_calibration_response = json_with_flag(usb_calibration_action_json(action.c_str(), value, has_value), "action_response", request_id);
+    usb_send(last_calibration_response);
     return;
   }
 
@@ -390,7 +410,8 @@ static void handle_command(const String &line) {
   if (cmd == "servo_calibration_start") {
     if (!require_usb_client()) return;
     bool initial_mode = json_get_bool(line, "initial", false);
-    usb_send(json_with_flag(usb_servo_calibration_start_json(initial_mode), "action_response"));
+    int request_id = json_get_int(line, "req", 0);
+    usb_send(json_with_flag(usb_servo_calibration_start_json(initial_mode), "action_response", request_id));
     return;
   }
 
@@ -405,6 +426,7 @@ static void handle_command(const String &line) {
     int limit_max = json_get_int(line, "limit_max", get_servo_max_angle_deg());
     int offset_us = json_get_int(line, "offset", get_servo_neutral_offset_us());
     int step_us = json_get_int(line, "step", get_servo_pwm_step_us());
+    int request_id = json_get_int(line, "req", 0);
     usb_send(json_with_flag(usb_servo_calibration_action_json(action.c_str(),
                                                               value,
                                                               has_value,
@@ -414,7 +436,8 @@ static void handle_command(const String &line) {
                                                               limit_max,
                                                               offset_us,
                                                               step_us),
-                            "action_response"));
+                            "action_response",
+                            request_id));
     return;
   }
 

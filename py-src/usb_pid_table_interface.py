@@ -16,6 +16,9 @@ except ImportError:
 
 REFRESH_MS = 60
 PLOT_DEFAULT_MAX_S = 30
+CAL_RETRY_INTERVAL_S = 2.0
+CAL_ACTION_TIMEOUT_S = 4.0
+CAL_MAX_RETRIES = 10
 
 
 class SerialLink:
@@ -215,8 +218,15 @@ class PIDTableApp:
         self.servo_calibration_active = False
         self.cal_state = {}
         self.cal_last_step = ""
+        self.cal_button_layout_key = None
         self.cal_pending_action_until = 0.0
         self.cal_pending_action = None
+        self.cal_pending_req = 0
+        self.cal_next_req = 1
+        self.cal_pending_payload = None
+        self.cal_pending_start_step = ""
+        self.cal_pending_last_send = 0.0
+        self.cal_pending_attempts = 0
         self.cal_last_action_response = None
         self.servo_state = {}
         self.plots_layout_narrow = None
@@ -595,9 +605,9 @@ class PIDTableApp:
             self._handle(msg)
         if self.connected:
             self._send({"cmd": "state"})
-            pending = time.monotonic() < self.cal_pending_action_until
-            if self.current_page == "calibration" and self.calibration_active and not pending:
+            if self.current_page == "calibration" and self.calibration_active:
                 self._send({"cmd": "calibration_state"})
+                self._retry_pending_calibration_action()
             if self.current_page == "calibration" and self.servo_calibration_active:
                 self._send({"cmd": "servo_calibration_state"})
         self.root.after(REFRESH_MS, self._poll)
@@ -621,9 +631,13 @@ class PIDTableApp:
             self._apply_advanced_state(msg)
         if msg.get("calibration"):
             if self.cal_pending_action:
-                self.cal_last_action_response = self.cal_pending_action
-                self.cal_pending_action = None
-                self.cal_pending_action_until = 0.0
+                if msg.get("action_response") and int(msg.get("req", -1)) == self.cal_pending_req:
+                    self._finish_pending_calibration_action()
+                elif str(msg.get("step", "")) != self.cal_pending_start_step:
+                    self._finish_pending_calibration_action()
+                else:
+                    self._apply_calibration_waiting_status(msg)
+                    return
             self._apply_calibration_state(msg)
         if msg.get("servo_calibration"):
             self._apply_servo_calibration_state(msg)
@@ -847,8 +861,7 @@ class PIDTableApp:
             msg["mode"] = mode
         if target:
             msg["target"] = target
-        self._mark_calibration_action_pending("start")
-        self._send(msg)
+        self._send_calibration_command("start", msg)
 
     def _calibration_action(self, action, value=None):
         self.calibration_active = True
@@ -861,14 +874,56 @@ class PIDTableApp:
             except ValueError:
                 messagebox.showwarning("Calibration", "Value must be numeric.")
                 return
-        self._mark_calibration_action_pending(action)
-        self._send(msg)
+        self._send_calibration_command(action, msg)
 
-    def _mark_calibration_action_pending(self, action):
+    def _send_calibration_command(self, action, msg):
+        request_id = self.cal_next_req
+        self.cal_next_req += 1
+        msg["req"] = request_id
         self.cal_pending_action = action
-        self.cal_pending_action_until = time.monotonic() + 0.8
+        self.cal_pending_req = request_id
+        self.cal_pending_payload = dict(msg)
+        self.cal_pending_start_step = str(self.cal_state.get("step", ""))
+        self.cal_pending_last_send = time.monotonic()
+        self.cal_pending_action_until = self.cal_pending_last_send + CAL_ACTION_TIMEOUT_S
+        self.cal_pending_attempts = 1
         for button in self.cal_buttons.values():
             button.configure(state="disabled")
+        self._send(msg)
+
+    def _retry_pending_calibration_action(self):
+        if not self.cal_pending_action or not self.cal_pending_payload:
+            return
+        now = time.monotonic()
+        if now - self.cal_pending_last_send < CAL_RETRY_INTERVAL_S:
+            return
+        if self.cal_pending_attempts >= CAL_MAX_RETRIES:
+            self.cal_status.set("No ESP32 acknowledgement. You can try the action again.")
+            self._finish_pending_calibration_action(mark_success=False)
+            return
+        self.cal_pending_last_send = now
+        self.cal_pending_action_until = now + CAL_ACTION_TIMEOUT_S
+        self.cal_pending_attempts += 1
+        self.cal_status.set(f"Waiting for ESP32... retry {self.cal_pending_attempts}")
+        self._send(dict(self.cal_pending_payload))
+
+    def _finish_pending_calibration_action(self, mark_success=True):
+        if mark_success:
+            self.cal_last_action_response = self.cal_pending_action
+        self.cal_pending_action = None
+        self.cal_pending_req = 0
+        self.cal_pending_payload = None
+        self.cal_pending_start_step = ""
+        self.cal_pending_last_send = 0.0
+        self.cal_pending_action_until = 0.0
+        self.cal_pending_attempts = 0
+
+    def _apply_calibration_waiting_status(self, msg):
+        self.cal_state = msg
+        step = str(msg.get("step", ""))
+        self.cal_title.set(msg.get("title", self.cal_title.get()))
+        self.cal_instruction.set(msg.get("instruction", self.cal_instruction.get()))
+        self.cal_status.set(f"Waiting for ESP32 to apply '{self.cal_pending_action}' on step {step}...")
 
     def _calibration_accept_or_done(self):
         step = str(self.cal_state.get("step", ""))
@@ -964,8 +1019,6 @@ class PIDTableApp:
         self.cal_last_action_response = None
 
     def _update_calibration_buttons(self, msg):
-        for widget in (self.cal_value_label, self.cal_value_entry, *self.cal_buttons.values()):
-            widget.pack_forget()
         for button in self.cal_buttons.values():
             button.configure(state="normal")
 
@@ -977,36 +1030,51 @@ class PIDTableApp:
         noise_done = step == "noise_done"
         step_changed = step != self.cal_last_step
         self.cal_last_step = step
+        just_calibrated = int(msg.get("default_verify_tof", 0))
+        visible = []
 
         if needs_real:
-            self.cal_value_label.pack(side="left")
-            self.cal_value_entry.pack(side="left", padx=5)
+            visible.extend(["value_label", "value_entry"])
             if step_changed or not self.cal_value.get():
                 self.cal_value.set(str(msg.get("real_fov", 145)))
-            self.cal_buttons["submit"].pack(side="left", padx=(0, 5))
+            visible.append("submit")
 
         if needs_done:
             self.cal_buttons["done"].configure(text="Capture bruit" if noise_step and not noise_done else "Done")
-            self.cal_buttons["done"].pack(side="left", padx=(0, 5))
+            visible.append("done")
 
         if verify:
-            just_calibrated = int(msg.get("default_verify_tof", 0))
             self.cal_buttons["accept"].configure(text="Accept" if just_calibrated else "Done")
-            self.cal_buttons["accept"].pack(side="left", padx=(0, 5))
+            visible.append("accept")
             if just_calibrated != 1:
-                self.cal_buttons["tof1"].pack(side="left", padx=(0, 5))
+                visible.append("tof1")
             if just_calibrated != 2:
-                self.cal_buttons["tof2"].pack(side="left", padx=(0, 5))
-            self.cal_buttons["noise"].pack(side="left", padx=(0, 5))
+                visible.append("tof2")
+            visible.append("noise")
 
         if noise_done:
             self.cal_buttons["accept"].configure(text="Accept")
-            self.cal_buttons["accept"].pack(side="left", padx=(0, 5))
+            visible.append("accept")
 
-        show_restart_cancel = not verify or int(msg.get("default_verify_tof", 0)) != 0
+        show_restart_cancel = not verify or just_calibrated != 0
         if show_restart_cancel:
-            self.cal_buttons["restart"].pack(side="left", padx=(0, 5))
-            self.cal_buttons["cancel"].pack(side="left", padx=(0, 5))
+            visible.extend(["restart", "cancel"])
+
+        layout_key = tuple(visible)
+        if layout_key == self.cal_button_layout_key:
+            return
+
+        self.cal_button_layout_key = layout_key
+        for widget in (self.cal_value_label, self.cal_value_entry, *self.cal_buttons.values()):
+            widget.pack_forget()
+
+        for name in visible:
+            if name == "value_label":
+                self.cal_value_label.pack(side="left")
+            elif name == "value_entry":
+                self.cal_value_entry.pack(side="left", padx=5)
+            else:
+                self.cal_buttons[name].pack(side="left", padx=(0, 5))
 
     def _apply_servo_calibration_state(self, msg):
         self.servo_state = msg
